@@ -1,3 +1,4 @@
+
 # Heart Rate Detection and Analysis GUI
 
 A Python GUI application for detecting and analyzing heart rate from ABF (Axon Binary Format) files. This tool provides an interactive interface for peak detection, manual editing, and comprehensive HRV (Heart Rate Variability) analysis.
@@ -161,14 +162,7 @@ When you're done working, you can deactivate the virtual environment:
 deactivate
 ```
 
-## License
-
-[Add your license here]
 
 ## Author
 
 Meryl Malezieux
-
-## Acknowledgments
-
-Based on original scripts by Meryl Malezieux for heart rate detection and analysis.
