@@ -318,6 +318,12 @@ class HRDetectionGUI:
         self.ax.set_title('Heart Rate Signal and Detected Peaks')
         self.ax.grid(True, alpha=0.3)
         self.ax.legend()
+        
+        # Auto-zoom to first 100 seconds
+        if self.hr_ts is not None and len(self.hr_ts) > 0:
+            max_time = min(100.0, self.hr_ts[-1])  # Show 100s or full signal if shorter
+            self.ax.set_xlim([self.hr_ts[0], max_time])
+        
         self.canvas.draw()
         
         # Update event editor if it exists
