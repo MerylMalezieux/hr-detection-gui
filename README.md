@@ -1,4 +1,6 @@
 # Heart Rate Detection and Analysis GUI
+## Test
+Testing git configuration.
 
 A Python GUI application for detecting and analyzing heart rate from ABF (Axon Binary Format) files. This tool provides an interactive interface for peak detection, manual editing, and comprehensive HRV (Heart Rate Variability) analysis.
 
