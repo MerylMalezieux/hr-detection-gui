@@ -23,3 +23,7 @@ Write-Host "To run the application:" -ForegroundColor Yellow
 Write-Host "  python main.py" -ForegroundColor Cyan
 Write-Host ""
 
+
+
+
+
