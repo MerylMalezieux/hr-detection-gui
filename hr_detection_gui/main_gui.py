@@ -38,6 +38,8 @@ class HRDetectionGUI:
         self.file_path = None
         self.mouse_id = ""
         self.hr_highpass = np.array([])
+        self.bpm_plot_needs_update = False  # Flag to track if BPM plot needs updating
+        self.bpm_lines = {}  # Cache for BPM plot lines
         
         # Create GUI elements
         self.create_widgets()
@@ -293,9 +295,8 @@ class HRDetectionGUI:
         if self.event_editor is not None:
             self.hr_sp_times = self.event_editor.get_events()
         
-        # Clear both subplots
+        # Clear bottom subplot (HR signal)
         self.ax.clear()
-        self.ax_bpm.clear()
         
         # Plot HR signal in bottom subplot
         self.ax.plot(self.hr_ts, self.hr, 'b-', linewidth=0.5, label='HR Signal', zorder=0)
@@ -325,28 +326,42 @@ class HRDetectionGUI:
             # Only show legend if we plotted something (peaks or signal)
             self.ax.legend()
         
-        # Plot BPM in top subplot if peaks are detected
+        # Only update BPM plot if it needs updating (when peaks change, not on every pan/zoom)
         has_peaks = False
+        current_events = None
         if self.event_editor is not None:
-            events = self.event_editor.get_events()
-            has_peaks = len(events) > 0
+            current_events = self.event_editor.get_events()
+            has_peaks = len(current_events) > 0
         elif self.hr_sp_times is not None:
+            current_events = self.hr_sp_times
             has_peaks = len(self.hr_sp_times) > 0
         
-        if has_peaks and len(self.hr_sp_times) >= 2:
-            # Compute original BPM if not already computed
+        if self.bpm_plot_needs_update and has_peaks and current_events is not None and len(current_events) >= 2:
+            # Clear BPM subplot only when needed
+            self.ax_bpm.clear()
+            
+            # Compute original BPM if not already computed (use current events from editor)
             if self.inst_bpm_original is None:
-                self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
+                self.inst_bpm_original = find_inst_bpm(self.hr, current_events, self.hr_ts)
             
-            # Plot original BPM in top subplot
+            # Subsample BPM data for faster plotting (plot every Nth point)
+            subsample_factor = max(1, len(self.hr_ts) // 10000)  # Limit to ~10k points
+            
+            # Plot original BPM in top subplot (subsampled for performance)
             if self.inst_bpm_original is not None:
-                self.ax_bpm.plot(self.hr_ts, self.inst_bpm_original, 'orange', 
+                ts_subsampled = self.hr_ts[::subsample_factor]
+                bpm_subsampled = self.inst_bpm_original[::subsample_factor]
+                line_orig = self.ax_bpm.plot(ts_subsampled, bpm_subsampled, 'orange', 
                               linewidth=1.5, label='BPM (original)', alpha=0.8)
+                self.bpm_lines['original'] = line_orig[0]
             
-            # Plot cleaned BPM if available (after computing metrics)
+            # Plot cleaned BPM if available (after computing metrics, subsampled)
             if self.inst_bpm is not None:
-                self.ax_bpm.plot(self.hr_ts, self.inst_bpm, 'g--', 
+                ts_subsampled = self.hr_ts[::subsample_factor]
+                bpm_clean_subsampled = self.inst_bpm[::subsample_factor]
+                line_clean = self.ax_bpm.plot(ts_subsampled, bpm_clean_subsampled, 'g--', 
                               linewidth=2, label='BPM (cleaned)', alpha=0.9)
+                self.bpm_lines['cleaned'] = line_clean[0]
             
             # Set labels for top subplot
             self.ax_bpm.set_ylabel('BPM')
@@ -361,6 +376,9 @@ class HRDetectionGUI:
                     bpm_min = np.min(valid_bpm) - 10
                     bpm_max = np.max(valid_bpm) + 10
                     self.ax_bpm.set_ylim([max(0, bpm_min), bpm_max])
+            
+            # Mark that BPM plot is up to date
+            self.bpm_plot_needs_update = False
         
         # Auto-zoom to first 5 seconds on x-axis (both subplots share x-axis)
         x_min = self.hr_ts[0] if self.hr_ts is not None and len(self.hr_ts) > 0 else 0
@@ -448,11 +466,13 @@ class HRDetectionGUI:
                                                 self.hr_sp_times.tolist(), self.ax, self.canvas)
             else:
                 # Reset event editor with new detection results (overwrites previous)
-                self.event_editor.update_events(self.hr_sp_times)
+                self.event_editor.update_events(self.hr_sp_times.tolist() if len(self.hr_sp_times) > 0 else [])
             
             # Compute original BPM immediately after detection for visual inspection
             if len(self.hr_sp_times) >= 2:
                 self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
+                # Mark that BPM plot needs updating
+                self.bpm_plot_needs_update = True
             
             # Plot results with new detection (will show original BPM in top subplot)
             self.plot_signal()

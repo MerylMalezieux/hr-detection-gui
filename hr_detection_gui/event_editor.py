@@ -40,7 +40,13 @@ class EventEditor:
         self.ts = ts
         self.time_series = time_series
         # Track original detected events (red)
-        self.original_events = set(events) if events is not None else set()
+        # Convert to list if numpy array, then to set
+        if events is not None:
+            if isinstance(events, np.ndarray):
+                events = events.tolist()
+            self.original_events = set(events) if len(events) > 0 else set()
+        else:
+            self.original_events = set()
         # Track manually added events (green)
         self.added_events = set()
         # Track removed events (grey, excluded from analysis)
@@ -211,7 +217,13 @@ class EventEditor:
     def update_events(self, events):
         """Update events list (resets to new detected events)."""
         # Reset all tracking
-        self.original_events = set(events) if events is not None else set()
+        # Convert to list if numpy array, then to set
+        if events is not None:
+            if isinstance(events, np.ndarray):
+                events = events.tolist()
+            self.original_events = set(events) if len(events) > 0 else set()
+        else:
+            self.original_events = set()
         self.added_events = set()
         self.removed_events = set()
         self.draw_events()
