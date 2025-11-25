@@ -337,17 +337,34 @@ class HRDetectionGUI:
             return
         
         try:
+            # Clear any previous detection results first
+            self.hr_sp_ind = None
+            self.hr_sp_times = None
+            self.inst_bpm = None
+            self.bpm_to_max = None
+            self.hrv_metrics = None
+            
             self.status_var.set("Detecting peaks...")
             self.root.update()
             
-            # Get parameters
+            # Get current parameters from GUI (always read fresh values)
             thresh = self.thresh_var.get()
             refrac = self.refrac_var.get()
             min_dur = self.min_dur_var.get()
-            highpass = self.highpass_var.get() if self.highpass_var.get() > 0 else None
+            highpass_val = self.highpass_var.get()
+            highpass = highpass_val if highpass_val > 0 else None
             use_abs = self.use_abs_var.get()
             
-            # Detect peaks
+            # Show parameters being used in status
+            param_str = f"thresh={thresh:.3f}, refrac={refrac:.1f}ms, min_dur={min_dur}"
+            if highpass:
+                param_str += f", highpass={highpass:.1f}Hz"
+            if use_abs:
+                param_str += ", abs=True"
+            self.status_var.set(f"Detecting peaks with: {param_str}...")
+            self.root.update()
+            
+            # Detect peaks with current parameters
             dVdt_thresh, self.hr_sp_ind = find_hr_peaks(
                 self.hr_ts, self.hr, thresh, refrac, min_dur, highpass, use_abs
             )
@@ -368,19 +385,20 @@ class HRDetectionGUI:
             else:
                 self.hr_sp_times = np.array([])
             
-            # Plot results
-            self.plot_signal()
-            
-            # Create/update event editor
+            # Update or create event editor with new detection results
+            # This will overwrite any previous detection
             if self.event_editor is None:
                 self.event_editor = EventEditor(self.root, self.hr_ts, self.hr, 
                                                 self.hr_sp_times.tolist(), self.ax, self.canvas)
             else:
+                # Reset event editor with new detection results (overwrites previous)
                 self.event_editor.update_events(self.hr_sp_times)
-                self.plot_signal()  # Redraw to show updated events
+            
+            # Plot results with new detection
+            self.plot_signal()
             
             num_peaks = len(self.hr_sp_times)
-            self.status_var.set(f"Detected {num_peaks} peaks. Use left/right click to edit.")
+            self.status_var.set(f"Detected {num_peaks} peaks with: {param_str}. Use left/right click to edit.")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to detect peaks:\n{str(e)}")
