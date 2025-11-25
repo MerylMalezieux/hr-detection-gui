@@ -38,7 +38,6 @@ class HRDetectionGUI:
         self.file_path = None
         self.mouse_id = ""
         self.hr_highpass = np.array([])
-        self.show_bpm_overlay = False  # Flag to show BPM overlay
         
         # Create GUI elements
         self.create_widgets()
@@ -138,13 +137,21 @@ class HRDetectionGUI:
         plot_frame.columnconfigure(0, weight=1)
         plot_frame.rowconfigure(0, weight=1)
         
-        # Create matplotlib figure
-        self.fig = Figure(figsize=(12, 6))
-        self.ax = self.fig.add_subplot(111)
+        # Create matplotlib figure with 2 subplots: BPM on top, HR signal on bottom
+        self.fig = Figure(figsize=(12, 8))
+        # Top subplot for BPM
+        self.ax_bpm = self.fig.add_subplot(211)
+        self.ax_bpm.set_ylabel('BPM')
+        self.ax_bpm.set_title('BPM (Original and Cleaned)')
+        self.ax_bpm.grid(True, alpha=0.3)
+        # Bottom subplot for HR signal and peaks
+        self.ax = self.fig.add_subplot(212, sharex=self.ax_bpm)
         self.ax.set_xlabel('Time (s)')
         self.ax.set_ylabel('Amplitude')
         self.ax.set_title('Heart Rate Signal and Detected Peaks')
         self.ax.grid(True, alpha=0.3)
+        # Adjust spacing between subplots
+        self.fig.tight_layout(pad=2.0)
         
         # Canvas frame for grid layout
         canvas_frame = ttk.Frame(plot_frame)
@@ -259,7 +266,6 @@ class HRDetectionGUI:
             self.bpm_to_max_original = None
             self.hrv_metrics = None
             self.hr_highpass = np.array([])
-            self.show_bpm_overlay = False
             
             # Clear/destroy event editor if it exists (new file = fresh start)
             if self.event_editor is not None:
@@ -279,20 +285,19 @@ class HRDetectionGUI:
             self.status_var.set("Error loading file")
     
     def plot_signal(self):
-        """Plot the HR signal."""
+        """Plot the HR signal and BPM."""
         if self.hr is None:
-            return
-        
-        # If BPM overlay is active, use the overlay plot instead
-        if self.show_bpm_overlay and self.inst_bpm is not None:
-            self.plot_signal_with_bpm_overlay()
             return
         
         # Get current events from editor if available
         if self.event_editor is not None:
             self.hr_sp_times = self.event_editor.get_events()
         
+        # Clear both subplots
         self.ax.clear()
+        self.ax_bpm.clear()
+        
+        # Plot HR signal in bottom subplot
         self.ax.plot(self.hr_ts, self.hr, 'b-', linewidth=0.5, label='HR Signal', zorder=0)
         
         # Plot peaks - let event_editor handle plotting if it exists to avoid duplicates
@@ -306,6 +311,7 @@ class HRDetectionGUI:
             self.ax.scatter(self.hr_sp_times, peak_ys, color='r', marker='o', 
                           s=30, zorder=2, label='Detected Peaks')
         
+        # Set labels for bottom subplot
         self.ax.set_xlabel('Time (s)')
         self.ax.set_ylabel('Amplitude')
         self.ax.set_title('Heart Rate Signal and Detected Peaks')
@@ -319,13 +325,7 @@ class HRDetectionGUI:
             # Only show legend if we plotted something (peaks or signal)
             self.ax.legend()
         
-        # Auto-zoom to first 5 seconds on x-axis
-        x_min = self.hr_ts[0] if self.hr_ts is not None and len(self.hr_ts) > 0 else 0
-        x_max = min(5.0, self.hr_ts[-1]) if self.hr_ts is not None and len(self.hr_ts) > 0 else 5.0
-        if self.hr_ts is not None and len(self.hr_ts) > 0:
-            self.ax.set_xlim([x_min, x_max])
-        
-        # Auto-zoom y-axis to fixed [-2, +2] range when peaks are detected
+        # Plot BPM in top subplot if peaks are detected
         has_peaks = False
         if self.event_editor is not None:
             events = self.event_editor.get_events()
@@ -333,12 +333,48 @@ class HRDetectionGUI:
         elif self.hr_sp_times is not None:
             has_peaks = len(self.hr_sp_times) > 0
         
+        if has_peaks and len(self.hr_sp_times) >= 2:
+            # Compute original BPM if not already computed
+            if self.inst_bpm_original is None:
+                self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
+            
+            # Plot original BPM in top subplot
+            if self.inst_bpm_original is not None:
+                self.ax_bpm.plot(self.hr_ts, self.inst_bpm_original, 'orange', 
+                              linewidth=1.5, label='BPM (original)', alpha=0.8)
+            
+            # Plot cleaned BPM if available (after computing metrics)
+            if self.inst_bpm is not None:
+                self.ax_bpm.plot(self.hr_ts, self.inst_bpm, 'g--', 
+                              linewidth=2, label='BPM (cleaned)', alpha=0.9)
+            
+            # Set labels for top subplot
+            self.ax_bpm.set_ylabel('BPM')
+            self.ax_bpm.set_title('BPM (Original and Cleaned)')
+            self.ax_bpm.grid(True, alpha=0.3)
+            self.ax_bpm.legend()
+            
+            # Auto-scale BPM axis
+            if self.inst_bpm_original is not None:
+                valid_bpm = self.inst_bpm_original[~np.isnan(self.inst_bpm_original)]
+                if len(valid_bpm) > 0:
+                    bpm_min = np.min(valid_bpm) - 10
+                    bpm_max = np.max(valid_bpm) + 10
+                    self.ax_bpm.set_ylim([max(0, bpm_min), bpm_max])
+        
+        # Auto-zoom to first 5 seconds on x-axis (both subplots share x-axis)
+        x_min = self.hr_ts[0] if self.hr_ts is not None and len(self.hr_ts) > 0 else 0
+        x_max = min(5.0, self.hr_ts[-1]) if self.hr_ts is not None and len(self.hr_ts) > 0 else 5.0
+        if self.hr_ts is not None and len(self.hr_ts) > 0:
+            self.ax.set_xlim([x_min, x_max])
+            # ax_bpm shares x-axis with ax, so it will update automatically
+        
         # Draw canvas first
         self.canvas.draw()
         
         # Then set y-axis zoom after drawing (to prevent matplotlib from overriding)
         if has_peaks:
-            # Use fixed range [-2, +2] for y-axis zoom
+            # Use fixed range [-2, +2] for y-axis zoom (bottom subplot)
             self.ax.set_ylim([-2, 2])
             # Disable auto-scaling for y-axis to preserve our zoom
             self.ax.set_autoscaley_on(False)
@@ -363,7 +399,6 @@ class HRDetectionGUI:
             self.bpm_to_max = None
             self.bpm_to_max_original = None
             self.hrv_metrics = None
-            self.show_bpm_overlay = False  # Reset overlay when re-detecting
             
             self.status_var.set("Detecting peaks...")
             self.root.update()
@@ -415,7 +450,11 @@ class HRDetectionGUI:
                 # Reset event editor with new detection results (overwrites previous)
                 self.event_editor.update_events(self.hr_sp_times)
             
-            # Plot results with new detection
+            # Compute original BPM immediately after detection for visual inspection
+            if len(self.hr_sp_times) >= 2:
+                self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
+            
+            # Plot results with new detection (will show original BPM in top subplot)
             self.plot_signal()
             
             num_peaks = len(self.hr_sp_times)
@@ -448,8 +487,9 @@ class HRDetectionGUI:
                 messagebox.showwarning("Warning", "Need at least 2 peaks to compute metrics.")
                 return
             
-            # Compute instantaneous BPM (original, before cleaning)
-            self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
+            # Compute original BPM if not already computed (should be computed after detection)
+            if self.inst_bpm_original is None:
+                self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
             
             # Compute BPM normalized to max (original)
             self.bpm_to_max_original = (self.inst_bpm_original * 100) / np.max(self.inst_bpm_original[~np.isnan(self.inst_bpm_original)])
@@ -464,91 +504,15 @@ class HRDetectionGUI:
             # Show metrics visualization window
             self.show_metrics_window()
             
-            # Update plot to show BPM overlay (original + cleaned)
-            self.show_bpm_overlay = True
-            self.plot_signal_with_bpm_overlay()
+            # Update plot to show cleaned BPM overlay on top of original BPM (in top subplot)
+            self.plot_signal()
             
-            self.status_var.set("Metrics computed successfully. BPM overlay shown.")
+            self.status_var.set("Metrics computed successfully. Cleaned BPM overlaid on original.")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to compute metrics:\n{str(e)}")
             self.status_var.set("Error computing metrics")
     
-    def plot_signal_with_bpm_overlay(self):
-        """Plot HR signal with BPM overlay (original and cleaned)."""
-        if self.hr is None:
-            return
-        
-        # Get current events from editor if available
-        if self.event_editor is not None:
-            self.hr_sp_times = self.event_editor.get_events()
-        
-        self.ax.clear()
-        
-        # Remove any existing twin axes
-        if len(self.ax.figure.axes) > 1:
-            for ax in self.ax.figure.axes:
-                if ax != self.ax:
-                    ax.remove()
-        
-        # Plot HR signal
-        self.ax.plot(self.hr_ts, self.hr, 'b-', linewidth=0.5, label='HR Signal', zorder=0, alpha=0.7)
-        
-        # Plot peaks if available
-        if self.event_editor is not None:
-            self.event_editor.draw_events()
-        elif self.hr_sp_times is not None and len(self.hr_sp_times) > 0:
-            peak_ys = np.interp(self.hr_sp_times, self.hr_ts, self.hr)
-            self.ax.scatter(self.hr_sp_times, peak_ys, color='r', marker='o', 
-                          s=30, zorder=2, label='Detected Peaks')
-        
-        # Create second y-axis for BPM
-        ax2 = self.ax.twinx()
-        
-        # Plot original BPM (before cleaning)
-        if self.inst_bpm_original is not None:
-            ax2.plot(self.hr_ts, self.inst_bpm_original, 'orange', linewidth=1.5, 
-                   label='BPM (original)', alpha=0.7, linestyle='--')
-        
-        # Plot cleaned BPM (after cleaning)
-        if self.inst_bpm is not None:
-            ax2.plot(self.hr_ts, self.inst_bpm, 'g-', linewidth=2, 
-                   label='BPM (cleaned)', alpha=0.9)
-        
-        # Set labels
-        self.ax.set_xlabel('Time (s)')
-        self.ax.set_ylabel('Amplitude', color='b')
-        ax2.set_ylabel('BPM', color='g')
-        self.ax.set_title('Heart Rate Signal with BPM Overlay (Original vs Cleaned)')
-        self.ax.grid(True, alpha=0.3)
-        
-        # Combine legends from both axes
-        lines1, labels1 = self.ax.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        self.ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-        
-        # Auto-zoom to first 5 seconds on x-axis
-        x_min = self.hr_ts[0] if self.hr_ts is not None and len(self.hr_ts) > 0 else 0
-        x_max = min(5.0, self.hr_ts[-1]) if self.hr_ts is not None and len(self.hr_ts) > 0 else 5.0
-        if self.hr_ts is not None and len(self.hr_ts) > 0:
-            self.ax.set_xlim([x_min, x_max])
-        
-        # Set y-axis for HR signal (amplitude) - zoom to fixed [-2, +2] range
-        self.ax.set_ylim([-2, 2])
-        self.ax.set_autoscaley_on(False)
-        
-        # Auto-scale BPM axis
-        if self.inst_bpm is not None:
-            valid_bpm = self.inst_bpm[~np.isnan(self.inst_bpm)]
-            if len(valid_bpm) > 0:
-                bpm_min = np.min(valid_bpm) - 10
-                bpm_max = np.max(valid_bpm) + 10
-                ax2.set_ylim([max(0, bpm_min), bpm_max])
-        
-        # Draw and then force y-axis limits again (to ensure they stick)
-        self.canvas.draw()
-        self.ax.set_ylim([-2, 2])
-        self.canvas.draw()
     
     def show_metrics_window(self):
         """Show metrics visualization window."""
