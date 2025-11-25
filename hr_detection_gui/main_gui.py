@@ -29,11 +29,13 @@ class HRDetectionGUI:
         self.hr = None
         self.hr_ts = None
         self.hr_sp_ind = None
-        self.hr_sp_times = None
-        self.inst_bpm = None  # Cleaned BPM (for saving)
-        self.inst_bpm_original = None  # Original BPM (for display)
+        self.hr_sp_times = None  # Original detected peaks (before manual editing)
+        self.inst_bpm = None  # Cleaned BPM signal (after outlier removal, for saving)
+        self.inst_bpm_original = None  # BPM from original detected peaks (for display/comparison)
+        self.inst_bpm_from_cleaned_peaks = None  # BPM computed from manually edited peaks (before signal cleaning)
         self.bpm_to_max = None  # Cleaned BPM normalized (for saving)
         self.bpm_to_max_original = None  # Original BPM normalized (for display)
+        self.bpm_to_max_from_cleaned_peaks = None  # BPM from cleaned peaks normalized (before signal cleaning)
         self.hrv_metrics = None
         self.file_path = None
         self.mouse_id = ""
@@ -264,8 +266,10 @@ class HRDetectionGUI:
             self.hr_sp_times = None
             self.inst_bpm = None
             self.inst_bpm_original = None
+            self.inst_bpm_from_cleaned_peaks = None
             self.bpm_to_max = None
             self.bpm_to_max_original = None
+            self.bpm_to_max_from_cleaned_peaks = None
             self.hrv_metrics = None
             self.hr_highpass = np.array([])
             
@@ -340,42 +344,55 @@ class HRDetectionGUI:
             # Clear BPM subplot only when needed
             self.ax_bpm.clear()
             
-            # Compute original BPM if not already computed (use current events from editor)
-            if self.inst_bpm_original is None:
-                self.inst_bpm_original = find_inst_bpm(self.hr, current_events, self.hr_ts)
+            # Ensure original BPM is computed (from original detection, before manual editing)
+            if self.inst_bpm_original is None and self.hr_sp_times is not None and len(self.hr_sp_times) >= 2:
+                self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
             
             # Subsample BPM data for faster plotting (plot every Nth point)
             subsample_factor = max(1, len(self.hr_ts) // 10000)  # Limit to ~10k points
             
-            # Plot original BPM in top subplot (subsampled for performance)
+            # Plot original BPM in top subplot (from original detection, before manual editing)
             if self.inst_bpm_original is not None:
                 ts_subsampled = self.hr_ts[::subsample_factor]
                 bpm_subsampled = self.inst_bpm_original[::subsample_factor]
                 line_orig = self.ax_bpm.plot(ts_subsampled, bpm_subsampled, 'orange', 
-                              linewidth=1.5, label='BPM (original)', alpha=0.8)
+                              linewidth=1.5, label='BPM (from original peaks)', alpha=0.8)
                 self.bpm_lines['original'] = line_orig[0]
             
-            # Plot cleaned BPM if available (after computing metrics, subsampled)
+            # Plot cleaned BPM if available (from cleaned peaks, after signal cleaning)
             if self.inst_bpm is not None:
                 ts_subsampled = self.hr_ts[::subsample_factor]
                 bpm_clean_subsampled = self.inst_bpm[::subsample_factor]
                 line_clean = self.ax_bpm.plot(ts_subsampled, bpm_clean_subsampled, 'g--', 
-                              linewidth=2, label='BPM (cleaned)', alpha=0.9)
+                              linewidth=2, label='BPM (from cleaned peaks, signal cleaned)', alpha=0.9)
                 self.bpm_lines['cleaned'] = line_clean[0]
             
             # Set labels for top subplot
             self.ax_bpm.set_ylabel('BPM')
-            self.ax_bpm.set_title('BPM (Original and Cleaned)')
+            self.ax_bpm.set_title('BPM: Original Detection vs. Cleaned Peaks (with signal cleaning)')
             self.ax_bpm.grid(True, alpha=0.3)
             self.ax_bpm.legend()
             
-            # Auto-scale BPM axis
+            # Auto-scale BPM axis to show both if available
+            bpm_min = None
+            bpm_max = None
             if self.inst_bpm_original is not None:
                 valid_bpm = self.inst_bpm_original[~np.isnan(self.inst_bpm_original)]
                 if len(valid_bpm) > 0:
                     bpm_min = np.min(valid_bpm) - 10
                     bpm_max = np.max(valid_bpm) + 10
-                    self.ax_bpm.set_ylim([max(0, bpm_min), bpm_max])
+            if self.inst_bpm is not None:
+                valid_bpm = self.inst_bpm[~np.isnan(self.inst_bpm)]
+                if len(valid_bpm) > 0:
+                    if bpm_min is None:
+                        bpm_min = np.min(valid_bpm) - 10
+                        bpm_max = np.max(valid_bpm) + 10
+                    else:
+                        bpm_min = min(bpm_min, np.min(valid_bpm) - 10)
+                        bpm_max = max(bpm_max, np.max(valid_bpm) + 10)
+            
+            if bpm_min is not None and bpm_max is not None:
+                self.ax_bpm.set_ylim([max(0, bpm_min), bpm_max])
             
             # Mark that BPM plot is up to date
             self.bpm_plot_needs_update = False
@@ -414,8 +431,10 @@ class HRDetectionGUI:
             self.hr_sp_times = None
             self.inst_bpm = None
             self.inst_bpm_original = None
+            self.inst_bpm_from_cleaned_peaks = None
             self.bpm_to_max = None
             self.bpm_to_max_original = None
+            self.bpm_to_max_from_cleaned_peaks = None
             self.hrv_metrics = None
             
             self.status_var.set("Detecting peaks...")
@@ -485,7 +504,8 @@ class HRDetectionGUI:
             self.status_var.set("Error detecting peaks")
     
     def compute_metrics(self):
-        """Compute BPM and HRV metrics."""
+        """Compute BPM and HRV metrics from cleaned peaks (manually edited)."""
+        # Check if we have original detection
         if self.hr_sp_times is None or len(self.hr_sp_times) == 0:
             messagebox.showwarning("Warning", "Please detect peaks first.")
             return
@@ -494,32 +514,46 @@ class HRDetectionGUI:
             self.status_var.set("Computing metrics...")
             self.root.update()
             
-            # Get events from editor if available
+            # Get cleaned events from editor (includes manually added, excludes manually removed)
+            cleaned_events = None
             if self.event_editor is not None:
-                self.hr_sp_times = self.event_editor.get_events()
-                if len(self.hr_sp_times) > 0:
-                    # Convert back to indices for consistency
-                    self.hr_sp_ind = np.searchsorted(self.hr_ts, self.hr_sp_times)
-                else:
-                    self.hr_sp_ind = np.array([])
+                cleaned_events = self.event_editor.get_events()
+            else:
+                # Fallback to original if no editor (shouldn't happen, but be safe)
+                cleaned_events = self.hr_sp_times
             
-            if len(self.hr_sp_times) < 2:
+            if len(cleaned_events) < 2:
                 messagebox.showwarning("Warning", "Need at least 2 peaks to compute metrics.")
                 return
             
-            # Compute original BPM if not already computed (should be computed after detection)
+            # Ensure we have original BPM computed (from original detection, before manual editing)
             if self.inst_bpm_original is None:
                 self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
+                if self.inst_bpm_original is not None:
+                    self.bpm_to_max_original = (self.inst_bpm_original * 100) / np.max(self.inst_bpm_original[~np.isnan(self.inst_bpm_original)])
             
-            # Compute BPM normalized to max (original)
-            self.bpm_to_max_original = (self.inst_bpm_original * 100) / np.max(self.inst_bpm_original[~np.isnan(self.inst_bpm_original)])
+            # Compute BPM from cleaned peaks (manually edited peaks)
+            self.inst_bpm_from_cleaned_peaks = find_inst_bpm(self.hr, cleaned_events, self.hr_ts)
             
-            # Clean BPM signals (store cleaned version for saving)
-            self.inst_bpm, self.bpm_to_max = clean_bpm_signal(self.inst_bpm_original.copy(), self.bpm_to_max_original.copy())
+            # Compute BPM normalized to max (from cleaned peaks)
+            if self.inst_bpm_from_cleaned_peaks is not None:
+                valid_bpm = self.inst_bpm_from_cleaned_peaks[~np.isnan(self.inst_bpm_from_cleaned_peaks)]
+                if len(valid_bpm) > 0:
+                    self.bpm_to_max_from_cleaned_peaks = (self.inst_bpm_from_cleaned_peaks * 100) / np.max(valid_bpm)
+                else:
+                    self.bpm_to_max_from_cleaned_peaks = np.full_like(self.inst_bpm_from_cleaned_peaks, np.nan)
             
-            # Compute HRV metrics (using cleaned data would require re-computing from cleaned peaks,
-            # but for now we'll use the original peaks for HRV metrics as that's more standard)
-            self.hrv_metrics = calculate_all_hrv_metrics(self.hr_sp_times)
+            # Clean BPM signals (outlier removal, interpolation) - this is the final cleaned version
+            self.inst_bpm, self.bpm_to_max = clean_bpm_signal(
+                self.inst_bpm_from_cleaned_peaks.copy(), 
+                self.bpm_to_max_from_cleaned_peaks.copy()
+            )
+            
+            # Compute HRV metrics from cleaned peaks (manually edited)
+            self.hrv_metrics = calculate_all_hrv_metrics(cleaned_events)
+            
+            # Mark that BPM plot needs updating to show cleaned BPM
+            self.bpm_plot_needs_update = True
             
             # Show metrics visualization window
             self.show_metrics_window()
@@ -527,7 +561,7 @@ class HRDetectionGUI:
             # Update plot to show cleaned BPM overlay on top of original BPM (in top subplot)
             self.plot_signal()
             
-            self.status_var.set("Metrics computed successfully. Cleaned BPM overlaid on original.")
+            self.status_var.set("Metrics computed successfully from cleaned peaks. Cleaned BPM overlaid on original.")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to compute metrics:\n{str(e)}")
@@ -538,6 +572,12 @@ class HRDetectionGUI:
         """Show metrics visualization window."""
         if self.hrv_metrics is None or self.inst_bpm is None:
             return
+        
+        # Get cleaned events (from editor if available, otherwise original)
+        if self.event_editor is not None:
+            cleaned_events = self.event_editor.get_events()
+        else:
+            cleaned_events = self.hr_sp_times
         
         # Create new window
         metrics_window = tk.Toplevel(self.root)
@@ -557,7 +597,11 @@ class HRDetectionGUI:
         
         summary_content = "HRV METRICS SUMMARY\n"
         summary_content += "=" * 50 + "\n\n"
-        summary_content += f"Mean Heart Rate:        {self.hrv_metrics['mean_hr']:.2f} BPM\n"
+        summary_content += f"Mean Heart Rate (from RR): {self.hrv_metrics['mean_hr']:.2f} BPM\n"
+        if self.inst_bpm is not None:
+            summary_content += f"Mean BPM (cleaned):       {np.nanmean(self.inst_bpm):.2f} BPM\n"
+            summary_content += f"Median BPM (cleaned):     {np.nanmedian(self.inst_bpm):.2f} BPM\n"
+            summary_content += f"Std BPM (cleaned):        {np.nanstd(self.inst_bpm):.2f} BPM\n"
         summary_content += f"SDNN:                   {self.hrv_metrics['sdnn']:.2f} ms\n"
         summary_content += f"RMSSD (mean):           {np.nanmean(self.hrv_metrics['rmssd']):.2f} ms\n"
         summary_content += f"RMSSD (median):         {np.nanmedian(self.hrv_metrics['rmssd']):.2f} ms\n"
@@ -573,18 +617,29 @@ class HRDetectionGUI:
         summary_text.insert('1.0', summary_content)
         summary_text.config(state=tk.DISABLED)
         
-        # Tab 2: BPM over time
+        # Tab 2: BPM over time (show both original and cleaned)
         bpm_frame = ttk.Frame(notebook)
         notebook.add(bpm_frame, text="BPM Over Time")
         
         fig_bpm = Figure(figsize=(10, 5))
         ax_bpm = fig_bpm.add_subplot(111)
-        ax_bpm.plot(self.hr_ts, self.inst_bpm, 'g-', linewidth=1)
-        ax_bpm.axhline(y=np.nanmean(self.inst_bpm), color='r', linestyle='--', 
-                      label=f'Mean: {np.nanmean(self.inst_bpm):.2f} BPM')
+        
+        # Plot original BPM if available (from original detection, before manual editing)
+        if self.inst_bpm_original is not None:
+            ax_bpm.plot(self.hr_ts, self.inst_bpm_original, 'orange', linewidth=1, 
+                       alpha=0.7, label='BPM (from original peaks)')
+            ax_bpm.axhline(y=np.nanmean(self.inst_bpm_original), color='orange', 
+                          linestyle=':', alpha=0.5, linewidth=1)
+        
+        # Plot cleaned BPM (from cleaned peaks, after signal cleaning - this is the main one)
+        if self.inst_bpm is not None:
+            ax_bpm.plot(self.hr_ts, self.inst_bpm, 'g-', linewidth=2, 
+                       label='BPM (from cleaned peaks, signal cleaned)')
+            ax_bpm.axhline(y=np.nanmean(self.inst_bpm), color='r', linestyle='--', 
+                          label=f'Mean (cleaned): {np.nanmean(self.inst_bpm):.2f} BPM')
         ax_bpm.set_xlabel('Time (s)')
         ax_bpm.set_ylabel('BPM')
-        ax_bpm.set_title('Instantaneous Heart Rate (BPM)')
+        ax_bpm.set_title('Instantaneous Heart Rate - Original vs. Cleaned Peaks (with signal cleaning)')
         ax_bpm.grid(True, alpha=0.3)
         ax_bpm.legend()
         
@@ -601,13 +656,13 @@ class HRDetectionGUI:
             ax_rmssd = fig_rmssd.add_subplot(111)
             
             # Calculate time points for RMSSD (one less than RR intervals)
-            if len(self.hr_sp_times) > 1:
-                rmssd_times = self.hr_sp_times[1:-1]  # Approximate times for RMSSD
+            if len(cleaned_events) > 1:
+                rmssd_times = cleaned_events[1:-1]  # Approximate times for RMSSD
                 if len(rmssd_times) > len(self.hrv_metrics['rmssd']):
                     rmssd_times = rmssd_times[:len(self.hrv_metrics['rmssd'])]
                 elif len(rmssd_times) < len(self.hrv_metrics['rmssd']):
                     # Create time array
-                    rmssd_times = np.linspace(self.hr_sp_times[1], self.hr_sp_times[-1], 
+                    rmssd_times = np.linspace(cleaned_events[1], cleaned_events[-1], 
                                             len(self.hrv_metrics['rmssd']))
                 
                 valid_mask = ~np.isnan(self.hrv_metrics['rmssd'])
@@ -630,15 +685,15 @@ class HRDetectionGUI:
             canvas_rmssd.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         
         # Tab 4: RR Intervals
-        if len(self.hr_sp_times) > 1:
+        if len(cleaned_events) > 1:
             rr_frame = ttk.Frame(notebook)
             notebook.add(rr_frame, text="RR Intervals")
             
             fig_rr = Figure(figsize=(10, 5))
             ax_rr = fig_rr.add_subplot(111)
             
-            RR = np.diff(self.hr_sp_times) * 1000  # Convert to ms
-            rr_times = self.hr_sp_times[1:]  # Times for RR intervals
+            RR = np.diff(cleaned_events) * 1000  # Convert to ms
+            rr_times = cleaned_events[1:]  # Times for RR intervals
             
             ax_rr.plot(rr_times, RR, 'o-', markersize=3, linewidth=1)
             ax_rr.axhline(y=np.nanmean(RR), color='r', linestyle='--',
