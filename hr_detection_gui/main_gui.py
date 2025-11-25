@@ -300,19 +300,30 @@ class HRDetectionGUI:
         self.ax.set_title('Heart Rate Signal and Detected Peaks')
         self.ax.grid(True, alpha=0.3)
         
-        # Update event editor if it exists - this will plot events
+        # Update event editor if it exists - this will plot events and update legend
         if self.event_editor is not None:
             self.event_editor.draw_events()
-            # Create legend after events are drawn to include both signal and events
-            self.ax.legend()
+            # draw_events() will handle legend creation to include all event types
         else:
             # Only show legend if we plotted something (peaks or signal)
             self.ax.legend()
         
-        # Auto-zoom to first 100 seconds
+        # Auto-zoom to first 5 seconds on x-axis
+        x_min = self.hr_ts[0] if self.hr_ts is not None and len(self.hr_ts) > 0 else 0
+        x_max = min(5.0, self.hr_ts[-1]) if self.hr_ts is not None and len(self.hr_ts) > 0 else 5.0
         if self.hr_ts is not None and len(self.hr_ts) > 0:
-            max_time = min(5.0, self.hr_ts[-1])  # Show 5s or full signal if shorter
-            self.ax.set_xlim([self.hr_ts[0], max_time])
+            self.ax.set_xlim([x_min, x_max])
+        
+        # Auto-zoom y-axis to signal range ± 2 when peaks are detected
+        if (self.event_editor is not None and len(self.event_editor.get_events()) > 0) or \
+           (self.hr_sp_times is not None and len(self.hr_sp_times) > 0):
+            # Get visible signal range in current x-axis view
+            mask = (self.hr_ts >= x_min) & (self.hr_ts <= x_max)
+            if np.any(mask):
+                visible_signal = self.hr[mask]
+                y_min = np.min(visible_signal) - 2
+                y_max = np.max(visible_signal) + 2
+                self.ax.set_ylim([y_min, y_max])
         
         self.canvas.draw()
     

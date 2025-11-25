@@ -185,8 +185,19 @@ class EventEditor:
                                           alpha=0.6, label='Removed (excluded)')
             self.event_plots.append(scatter_grey)
         
-        # Don't create legend here - let the main plot_signal method handle it
-        # to avoid duplicates and ensure HR Signal is included
+        # Update legend to include all elements (signal + all event types)
+        # Remove duplicates while preserving order
+        handles, labels = self.ax.get_legend_handles_labels()
+        seen = set()
+        unique_handles = []
+        unique_labels = []
+        for handle, label in zip(handles, labels):
+            if label not in seen:
+                seen.add(label)
+                unique_handles.append(handle)
+                unique_labels.append(label)
+        if unique_handles:  # Only create legend if there are elements
+            self.ax.legend(unique_handles, unique_labels)
         
         if self.canvas:
             self.canvas.draw_idle()
