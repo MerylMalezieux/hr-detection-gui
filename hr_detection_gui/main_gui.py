@@ -321,7 +321,7 @@ class HRDetectionGUI:
         
         # Auto-zoom to first 100 seconds
         if self.hr_ts is not None and len(self.hr_ts) > 0:
-            max_time = min(100.0, self.hr_ts[-1])  # Show 100s or full signal if shorter
+            max_time = min(5.0, self.hr_ts[-1])  # Show 5s or full signal if shorter
             self.ax.set_xlim([self.hr_ts[0], max_time])
         
         self.canvas.draw()
