@@ -314,16 +314,24 @@ class HRDetectionGUI:
         if self.hr_ts is not None and len(self.hr_ts) > 0:
             self.ax.set_xlim([x_min, x_max])
         
-        # Auto-zoom y-axis to signal range ± 2 when peaks are detected
-        if (self.event_editor is not None and len(self.event_editor.get_events()) > 0) or \
-           (self.hr_sp_times is not None and len(self.hr_sp_times) > 0):
-            # Get visible signal range in current x-axis view
-            mask = (self.hr_ts >= x_min) & (self.hr_ts <= x_max)
-            if np.any(mask):
-                visible_signal = self.hr[mask]
-                y_min = np.min(visible_signal) - 2
-                y_max = np.max(visible_signal) + 2
-                self.ax.set_ylim([y_min, y_max])
+        # Auto-zoom y-axis to full signal range ± 2 when peaks are detected
+        has_peaks = False
+        if self.event_editor is not None:
+            events = self.event_editor.get_events()
+            has_peaks = len(events) > 0
+        elif self.hr_sp_times is not None:
+            has_peaks = len(self.hr_sp_times) > 0
+        
+        if has_peaks and len(self.hr) > 0:
+            # Use full signal range (not just visible window) for y-axis zoom
+            y_min = np.min(self.hr) - 2
+            y_max = np.max(self.hr) + 2
+            self.ax.set_ylim([y_min, y_max])
+            # Disable auto-scaling for y-axis to preserve our zoom
+            self.ax.set_autoscaley_on(False)
+        else:
+            # Re-enable auto-scaling when no peaks detected
+            self.ax.set_autoscaley_on(True)
         
         self.canvas.draw()
     
