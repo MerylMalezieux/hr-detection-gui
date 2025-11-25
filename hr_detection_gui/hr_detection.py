@@ -225,3 +225,7 @@ def find_inst_bpm(hr, sp_times, ts):
     inst_bpm = pd.Series(inst_bpm).rolling(window=1000, center=True).mean()
     return inst_bpm.values
 
+
+
+
+

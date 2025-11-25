@@ -247,7 +247,7 @@ class HRDetectionGUI:
             filename = os.path.basename(file_path)
             self.file_label.config(text=filename)
             
-            # Reset detection results
+            # Reset detection results completely
             self.hr_sp_ind = None
             self.hr_sp_times = None
             self.inst_bpm = None
@@ -255,11 +255,15 @@ class HRDetectionGUI:
             self.hrv_metrics = None
             self.hr_highpass = np.array([])
             
+            # Clear/destroy event editor if it exists (new file = fresh start)
+            if self.event_editor is not None:
+                self.event_editor = None
+            
             # Try to extract mouse ID from filename if possible
             # (e.g., if filename contains mouse ID pattern)
             # For now, leave it empty for user to enter
             
-            # Plot signal
+            # Plot signal (without any peaks since we cleared everything)
             self.plot_signal()
             
             self.status_var.set(f"File loaded: {filename}")
@@ -280,33 +284,11 @@ class HRDetectionGUI:
         self.ax.clear()
         self.ax.plot(self.hr_ts, self.hr, 'b-', linewidth=0.5, label='HR Signal', zorder=0)
         
-        # Plot peaks with different colors if event editor exists
+        # Plot peaks - let event_editor handle plotting if it exists to avoid duplicates
         if self.event_editor is not None:
-            # Get all event types
-            original_active = [e for e in self.event_editor.original_events 
-                             if e not in self.event_editor.removed_events]
-            added_active = [e for e in self.event_editor.added_events 
-                          if e not in self.event_editor.removed_events]
-            removed = list(self.event_editor.removed_events)
-            
-            # Plot original detected peaks (red)
-            if original_active:
-                peak_ys = np.interp(original_active, self.hr_ts, self.hr)
-                self.ax.scatter(original_active, peak_ys, color='r', marker='o', 
-                              s=30, zorder=3, label='Detected peaks', edgecolors='darkred')
-            
-            # Plot manually added peaks (green)
-            if added_active:
-                peak_ys = np.interp(added_active, self.hr_ts, self.hr)
-                self.ax.scatter(added_active, peak_ys, color='g', marker='o', 
-                              s=30, zorder=3, label='Manually added', edgecolors='darkgreen')
-            
-            # Plot removed peaks (grey)
-            if removed:
-                peak_ys = np.interp(removed, self.hr_ts, self.hr)
-                self.ax.scatter(removed, peak_ys, color='grey', marker='o', 
-                              s=30, zorder=2, label='Removed (excluded)', 
-                              edgecolors='darkgrey', alpha=0.6)
+            # Event editor will handle all event plotting via draw_events()
+            # Don't plot here to avoid duplicate legend entries
+            pass
         elif self.hr_sp_times is not None and len(self.hr_sp_times) > 0:
             # Fallback: just plot all peaks in red if no event editor
             peak_ys = np.interp(self.hr_sp_times, self.hr_ts, self.hr)
@@ -317,7 +299,15 @@ class HRDetectionGUI:
         self.ax.set_ylabel('Amplitude')
         self.ax.set_title('Heart Rate Signal and Detected Peaks')
         self.ax.grid(True, alpha=0.3)
-        self.ax.legend()
+        
+        # Update event editor if it exists - this will plot events
+        if self.event_editor is not None:
+            self.event_editor.draw_events()
+            # Create legend after events are drawn to include both signal and events
+            self.ax.legend()
+        else:
+            # Only show legend if we plotted something (peaks or signal)
+            self.ax.legend()
         
         # Auto-zoom to first 100 seconds
         if self.hr_ts is not None and len(self.hr_ts) > 0:
@@ -325,10 +315,6 @@ class HRDetectionGUI:
             self.ax.set_xlim([self.hr_ts[0], max_time])
         
         self.canvas.draw()
-        
-        # Update event editor if it exists
-        if self.event_editor is not None:
-            self.event_editor.draw_events()
     
     def detect_peaks(self):
         """Detect HR peaks using current parameters."""

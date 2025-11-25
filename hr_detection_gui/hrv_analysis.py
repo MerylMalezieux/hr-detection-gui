@@ -243,3 +243,7 @@ def clean_bpm_signal(inst_bpm, bpm_to_max):
     
     return inst_bpm_clean, bpm_to_max_clean
 
+
+
+
+

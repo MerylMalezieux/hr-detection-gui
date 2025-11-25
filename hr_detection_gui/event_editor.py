@@ -185,9 +185,8 @@ class EventEditor:
                                           alpha=0.6, label='Removed (excluded)')
             self.event_plots.append(scatter_grey)
         
-        # Update legend if there are multiple types
-        if len([x for x in [original_active, added_active, removed] if x]) > 1:
-            self.ax.legend(loc='upper right', fontsize=8)
+        # Don't create legend here - let the main plot_signal method handle it
+        # to avoid duplicates and ensure HR Signal is included
         
         if self.canvas:
             self.canvas.draw_idle()
