@@ -42,6 +42,10 @@ class HRDetectionGUI:
         self.hr_highpass = np.array([])
         self.bpm_plot_needs_update = False  # Flag to track if BPM plot needs updating
         self.bpm_lines = {}  # Cache for BPM plot lines
+        self.bpm_window = None  # Separate window for BPM plot
+        self.bpm_fig = None  # Figure for BPM window
+        self.bpm_ax = None  # Axes for BPM window
+        self.bpm_canvas = None  # Canvas for BPM window
         
         # Create GUI elements
         self.create_widgets()
@@ -133,28 +137,24 @@ class HRDetectionGUI:
         
         ttk.Button(buttons_frame, text="Detect Peaks", command=self.detect_peaks).grid(row=0, column=0, padx=5, pady=2)
         ttk.Button(buttons_frame, text="Compute BPM/HRV", command=self.compute_metrics).grid(row=1, column=0, padx=5, pady=2)
-        ttk.Button(buttons_frame, text="Save Results", command=self.save_results).grid(row=2, column=0, padx=5, pady=2)
+        ttk.Button(buttons_frame, text="Show BPM Plot", command=self.show_bpm_window).grid(row=2, column=0, padx=5, pady=2)
+        ttk.Button(buttons_frame, text="Save Results", command=self.save_results).grid(row=3, column=0, padx=5, pady=2)
         
-        # Main plot area
+        # Main plot area (only HR signal, BPM will be in separate window)
         plot_frame = ttk.Frame(main_frame)
         plot_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S))
         plot_frame.columnconfigure(0, weight=1)
         plot_frame.rowconfigure(0, weight=1)
         
-        # Create matplotlib figure with 2 subplots: BPM on top, HR signal on bottom
-        self.fig = Figure(figsize=(12, 8))
-        # Top subplot for BPM
-        self.ax_bpm = self.fig.add_subplot(211)
-        self.ax_bpm.set_ylabel('BPM')
-        self.ax_bpm.set_title('BPM (Original and Cleaned)')
-        self.ax_bpm.grid(True, alpha=0.3)
-        # Bottom subplot for HR signal and peaks
-        self.ax = self.fig.add_subplot(212, sharex=self.ax_bpm)
+        # Create matplotlib figure with single subplot for HR signal
+        self.fig = Figure(figsize=(12, 6))
+        # Single subplot for HR signal and peaks
+        self.ax = self.fig.add_subplot(111)
         self.ax.set_xlabel('Time (s)')
         self.ax.set_ylabel('Amplitude')
         self.ax.set_title('Heart Rate Signal and Detected Peaks')
         self.ax.grid(True, alpha=0.3)
-        # Adjust spacing between subplots
+        # Adjust spacing
         self.fig.tight_layout(pad=2.0)
         
         # Canvas frame for grid layout
@@ -290,6 +290,138 @@ class HRDetectionGUI:
             messagebox.showerror("Error", f"Failed to load file:\n{str(e)}")
             self.status_var.set("Error loading file")
     
+    def show_bpm_window(self):
+        """Show or create the BPM plot window."""
+        try:
+            window_exists = self.bpm_window is not None and self.bpm_window.winfo_exists()
+        except:
+            window_exists = False
+        
+        if not window_exists:
+            # Create new window
+            self.bpm_window = tk.Toplevel(self.root)
+            self.bpm_window.title("BPM Plot - Original vs. Cleaned")
+            self.bpm_window.geometry("1200x400")
+            
+            # Create figure and canvas
+            self.bpm_fig = Figure(figsize=(12, 4))
+            self.bpm_ax = self.bpm_fig.add_subplot(111)
+            self.bpm_ax.set_xlabel('Time (s)')
+            self.bpm_ax.set_ylabel('BPM')
+            self.bpm_ax.set_title('BPM: Original Detection vs. Cleaned Peaks (with signal cleaning)')
+            self.bpm_ax.grid(True, alpha=0.3)
+            
+            # Canvas
+            self.bpm_canvas = FigureCanvasTkAgg(self.bpm_fig, self.bpm_window)
+            self.bpm_canvas.draw()
+            self.bpm_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            
+            # Toolbar
+            bpm_toolbar = NavigationToolbar2Tk(self.bpm_canvas, self.bpm_window)
+            bpm_toolbar.update()
+            
+            # Handle window close
+            self.bpm_window.protocol("WM_DELETE_WINDOW", self.close_bpm_window)
+        
+        # Update the plot
+        self.update_bpm_window()
+        # Bring window to front
+        self.bpm_window.lift()
+        self.bpm_window.focus_force()
+    
+    def close_bpm_window(self):
+        """Close the BPM window."""
+        if self.bpm_window is not None:
+            self.bpm_window.destroy()
+            self.bpm_window = None
+            self.bpm_fig = None
+            self.bpm_ax = None
+            self.bpm_canvas = None
+    
+    def update_bpm_window(self):
+        """Update the BPM plot in the separate window."""
+        try:
+            if self.bpm_window is None or not self.bpm_window.winfo_exists():
+                return
+        except:
+            return
+        
+        if self.hr_ts is None or len(self.hr_ts) == 0:
+            return
+        
+        # Check if we have peaks
+        has_peaks = False
+        if self.event_editor is not None:
+            current_events = self.event_editor.get_events()
+            has_peaks = len(current_events) > 0
+        elif self.hr_sp_times is not None:
+            has_peaks = len(self.hr_sp_times) > 0
+        
+        if not has_peaks:
+            return
+        
+        # Clear BPM axes
+        self.bpm_ax.clear()
+        
+        # Ensure original BPM is computed (from original detection, before manual editing)
+        if self.inst_bpm_original is None and self.hr_sp_times is not None and len(self.hr_sp_times) >= 2:
+            self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
+        
+        # Subsample BPM data for faster plotting (plot every Nth point)
+        subsample_factor = max(1, len(self.hr_ts) // 10000)  # Limit to ~10k points
+        
+        # Plot original BPM (from original detection, before manual editing)
+        if self.inst_bpm_original is not None:
+            ts_subsampled = self.hr_ts[::subsample_factor]
+            bpm_subsampled = self.inst_bpm_original[::subsample_factor]
+            self.bpm_ax.plot(ts_subsampled, bpm_subsampled, 'orange', 
+                          linewidth=1.5, label='BPM (from original peaks)', alpha=0.8)
+        
+        # Plot cleaned BPM if available (from cleaned peaks, after signal cleaning)
+        if self.inst_bpm is not None:
+            ts_subsampled = self.hr_ts[::subsample_factor]
+            bpm_clean_subsampled = self.inst_bpm[::subsample_factor]
+            self.bpm_ax.plot(ts_subsampled, bpm_clean_subsampled, 'g--', 
+                          linewidth=2, label='BPM (from cleaned peaks, signal cleaned)', alpha=0.9)
+        
+        # Set labels
+        self.bpm_ax.set_xlabel('Time (s)')
+        self.bpm_ax.set_ylabel('BPM')
+        self.bpm_ax.set_title('BPM: Original Detection vs. Cleaned Peaks (with signal cleaning)')
+        self.bpm_ax.grid(True, alpha=0.3)
+        self.bpm_ax.legend()
+        
+        # Auto-scale BPM axis to show both if available
+        bpm_min = None
+        bpm_max = None
+        if self.inst_bpm_original is not None:
+            valid_bpm = self.inst_bpm_original[~np.isnan(self.inst_bpm_original)]
+            if len(valid_bpm) > 0:
+                bpm_min = np.min(valid_bpm) - 10
+                bpm_max = np.max(valid_bpm) + 10
+        if self.inst_bpm is not None:
+            valid_bpm = self.inst_bpm[~np.isnan(self.inst_bpm)]
+            if len(valid_bpm) > 0:
+                if bpm_min is None:
+                    bpm_min = np.min(valid_bpm) - 10
+                    bpm_max = np.max(valid_bpm) + 10
+                else:
+                    bpm_min = min(bpm_min, np.min(valid_bpm) - 10)
+                    bpm_max = max(bpm_max, np.max(valid_bpm) + 10)
+        
+        if bpm_min is not None and bpm_max is not None:
+            self.bpm_ax.set_ylim([max(0, bpm_min), bpm_max])
+        
+        # Auto-scale x-axis to full range
+        if self.hr_ts is not None and len(self.hr_ts) > 0:
+            self.bpm_ax.set_xlim([self.hr_ts[0], self.hr_ts[-1]])
+        
+        # Draw canvas
+        self.bpm_canvas.draw()
+        
+        # Mark that BPM plot is up to date
+        self.bpm_plot_needs_update = False
+    
     def plot_signal(self):
         """Plot the HR signal and BPM."""
         if self.hr is None:
@@ -330,79 +462,23 @@ class HRDetectionGUI:
             # Only show legend if we plotted something (peaks or signal)
             self.ax.legend()
         
-        # Only update BPM plot if it needs updating (when peaks change, not on every pan/zoom)
-        has_peaks = False
-        current_events = None
-        if self.event_editor is not None:
-            current_events = self.event_editor.get_events()
-            has_peaks = len(current_events) > 0
-        elif self.hr_sp_times is not None:
-            current_events = self.hr_sp_times
-            has_peaks = len(self.hr_sp_times) > 0
+        # Update BPM plot in separate window if it needs updating
+        if self.bpm_plot_needs_update:
+            self.update_bpm_window()
         
-        if self.bpm_plot_needs_update and has_peaks and current_events is not None and len(current_events) >= 2:
-            # Clear BPM subplot only when needed
-            self.ax_bpm.clear()
-            
-            # Ensure original BPM is computed (from original detection, before manual editing)
-            if self.inst_bpm_original is None and self.hr_sp_times is not None and len(self.hr_sp_times) >= 2:
-                self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
-            
-            # Subsample BPM data for faster plotting (plot every Nth point)
-            subsample_factor = max(1, len(self.hr_ts) // 10000)  # Limit to ~10k points
-            
-            # Plot original BPM in top subplot (from original detection, before manual editing)
-            if self.inst_bpm_original is not None:
-                ts_subsampled = self.hr_ts[::subsample_factor]
-                bpm_subsampled = self.inst_bpm_original[::subsample_factor]
-                line_orig = self.ax_bpm.plot(ts_subsampled, bpm_subsampled, 'orange', 
-                              linewidth=1.5, label='BPM (from original peaks)', alpha=0.8)
-                self.bpm_lines['original'] = line_orig[0]
-            
-            # Plot cleaned BPM if available (from cleaned peaks, after signal cleaning)
-            if self.inst_bpm is not None:
-                ts_subsampled = self.hr_ts[::subsample_factor]
-                bpm_clean_subsampled = self.inst_bpm[::subsample_factor]
-                line_clean = self.ax_bpm.plot(ts_subsampled, bpm_clean_subsampled, 'g--', 
-                              linewidth=2, label='BPM (from cleaned peaks, signal cleaned)', alpha=0.9)
-                self.bpm_lines['cleaned'] = line_clean[0]
-            
-            # Set labels for top subplot
-            self.ax_bpm.set_ylabel('BPM')
-            self.ax_bpm.set_title('BPM: Original Detection vs. Cleaned Peaks (with signal cleaning)')
-            self.ax_bpm.grid(True, alpha=0.3)
-            self.ax_bpm.legend()
-            
-            # Auto-scale BPM axis to show both if available
-            bpm_min = None
-            bpm_max = None
-            if self.inst_bpm_original is not None:
-                valid_bpm = self.inst_bpm_original[~np.isnan(self.inst_bpm_original)]
-                if len(valid_bpm) > 0:
-                    bpm_min = np.min(valid_bpm) - 10
-                    bpm_max = np.max(valid_bpm) + 10
-            if self.inst_bpm is not None:
-                valid_bpm = self.inst_bpm[~np.isnan(self.inst_bpm)]
-                if len(valid_bpm) > 0:
-                    if bpm_min is None:
-                        bpm_min = np.min(valid_bpm) - 10
-                        bpm_max = np.max(valid_bpm) + 10
-                    else:
-                        bpm_min = min(bpm_min, np.min(valid_bpm) - 10)
-                        bpm_max = max(bpm_max, np.max(valid_bpm) + 10)
-            
-            if bpm_min is not None and bpm_max is not None:
-                self.ax_bpm.set_ylim([max(0, bpm_min), bpm_max])
-            
-            # Mark that BPM plot is up to date
-            self.bpm_plot_needs_update = False
-        
-        # Auto-zoom to first 5 seconds on x-axis (both subplots share x-axis)
+        # Auto-zoom to first 5 seconds on x-axis
         x_min = self.hr_ts[0] if self.hr_ts is not None and len(self.hr_ts) > 0 else 0
         x_max = min(5.0, self.hr_ts[-1]) if self.hr_ts is not None and len(self.hr_ts) > 0 else 5.0
         if self.hr_ts is not None and len(self.hr_ts) > 0:
             self.ax.set_xlim([x_min, x_max])
-            # ax_bpm shares x-axis with ax, so it will update automatically
+        
+        # Check if we have peaks for y-axis zoom
+        has_peaks = False
+        if self.event_editor is not None:
+            events = self.event_editor.get_events()
+            has_peaks = len(events) > 0
+        elif self.hr_sp_times is not None:
+            has_peaks = len(self.hr_sp_times) > 0
         
         # Draw canvas first
         self.canvas.draw()
@@ -492,6 +568,13 @@ class HRDetectionGUI:
                 self.inst_bpm_original = find_inst_bpm(self.hr, self.hr_sp_times, self.hr_ts)
                 # Mark that BPM plot needs updating
                 self.bpm_plot_needs_update = True
+                # Auto-open BPM window if it doesn't exist
+                try:
+                    window_exists = self.bpm_window is not None and self.bpm_window.winfo_exists()
+                except:
+                    window_exists = False
+                if not window_exists:
+                    self.show_bpm_window()
             
             # Plot results with new detection (will show original BPM in top subplot)
             self.plot_signal()
@@ -554,6 +637,12 @@ class HRDetectionGUI:
             
             # Mark that BPM plot needs updating to show cleaned BPM
             self.bpm_plot_needs_update = True
+            # Update BPM window if it exists
+            try:
+                if self.bpm_window is not None and self.bpm_window.winfo_exists():
+                    self.update_bpm_window()
+            except:
+                pass
             
             # Show metrics visualization window
             self.show_metrics_window()
