@@ -5,8 +5,8 @@ A Python GUI application for detecting and analyzing heart rate from ABF (Axon B
 
 ## Features
 
-- **File Loading**: Load ABF files directly from your computer
-- **Interactive Peak Detection**: Adjustable parameters for threshold-based peak detection
+- **File Loading**: Load ABF files (pClamp) from folder
+- **Interactive Peak Detection**: Adjustable parameters for threshold-based peak detection based on the find_peaks function of scipy 
   - Threshold adjustment
   - Refractory period control
   - Minimum duration filtering
@@ -23,7 +23,7 @@ A Python GUI application for detecting and analyzing heart rate from ABF (Axon B
   - pNN50 (Percentage of NN intervals differing by >50ms)
   - Mean, median, min, max RR intervals
   - Additional statistical metrics
-- **Data Export**: Save results to NumPy (.npy) format for further analysis
+- **Data Export**: Save results to NumPy (.npy) dictionnary format for further analysis
 
 ## Installation
 
@@ -76,8 +76,14 @@ pip install -r requirements.txt
 ## Usage
 
 1. **Activate the virtual environment** (if not already activated):
+   **Windows (PowerShell):**
    ```powershell
    .\venv\Scripts\Activate.ps1
+   ```
+
+   **Windows (Command Prompt):**
+   ```cmd
+   venv\Scripts\activate.bat
    ```
 
 2. **Run the application**:
