@@ -168,6 +168,23 @@ When you're done working, you can deactivate the virtual environment:
 deactivate
 ```
 
+## Load the dictionnaries into Python and work with the data 
+
+When your datasets are saved, you can open them in a python environment using something like this:
+
+```bash
+import os
+import numpy as np
+
+dataset_folder = "your_path"
+
+hr_files = os.listdir(dataset_folder)
+data = [{} for _ in range(len(hr_files))]
+for i, fname in enumerate(hr_files):
+    full_file = os.path.join(dataset_folder, fname)
+    data[i] = np.load(full_file, allow_pickle=True).item()
+```
+
 
 ## Author
 
