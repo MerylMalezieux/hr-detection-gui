@@ -170,7 +170,7 @@ deactivate
 
 ## Load the dictionnaries into Python and work with the data 
 
-When your datasets are saved, you can open them in a python environment using something like this:
+When your datasets are saved, you can load them in a python environment using something like this:
 
 ```bash
 import os
