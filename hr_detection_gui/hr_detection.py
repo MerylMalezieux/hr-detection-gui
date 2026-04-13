@@ -5,6 +5,7 @@ Contains functions for loading ABF files and detecting heart rate peaks.
 """
 
 import os
+import json
 import numpy as np
 import pandas as pd
 from neo import io
@@ -642,6 +643,204 @@ def load_wav_file(file_path, channel=0, downsample_factor=10):
     return hr, hr_ts
 
 
+def _extract_open_ephys_metadata(dat_file_path):
+    """
+    Extract Open Ephys metadata from structure.oebin if available.
+
+    Returns:
+    --------
+    dict
+        Metadata containing sample_rate, num_channels, labels, and bit_volts.
+        Returns empty dict if metadata cannot be found or parsed.
+    """
+    dat_dir = os.path.dirname(os.path.abspath(dat_file_path))
+
+    # Typical Open Ephys layout places structure.oebin a few levels above continuous.dat.
+    candidate_paths = []
+    current_dir = dat_dir
+    for _ in range(6):
+        candidate_paths.append(os.path.join(current_dir, "structure.oebin"))
+        parent_dir = os.path.dirname(current_dir)
+        if parent_dir == current_dir:
+            break
+        current_dir = parent_dir
+
+    oebin_path = None
+    for candidate in candidate_paths:
+        if os.path.exists(candidate):
+            oebin_path = candidate
+            break
+
+    if oebin_path is None:
+        return {}
+
+    try:
+        with open(oebin_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    except Exception:
+        return {}
+
+    continuous_entries = metadata.get("continuous", [])
+    if not isinstance(continuous_entries, list) or len(continuous_entries) == 0:
+        return {}
+
+    # Try to match by folder name first.
+    dat_path_norm = os.path.normpath(os.path.abspath(dat_file_path)).lower()
+    matched_entry = None
+    for entry in continuous_entries:
+        folder_name = entry.get("folder_name", "")
+        if folder_name and folder_name.lower() in dat_path_norm:
+            matched_entry = entry
+            break
+
+    # Fallback to first continuous entry.
+    if matched_entry is None:
+        matched_entry = continuous_entries[0]
+
+    channels = matched_entry.get("channels", [])
+    labels = []
+    bit_volts = []
+    for i, channel_info in enumerate(channels):
+        channel_name = channel_info.get("channel_name") or channel_info.get("name") or f"Channel {i}"
+        labels.append(str(channel_name))
+        bit_volts_value = channel_info.get("bit_volts")
+        try:
+            bit_volts.append(float(bit_volts_value) if bit_volts_value is not None else None)
+        except (TypeError, ValueError):
+            bit_volts.append(None)
+
+    sample_rate = matched_entry.get("sample_rate")
+    num_channels = matched_entry.get("num_channels")
+    if num_channels is None and len(channels) > 0:
+        num_channels = len(channels)
+
+    result = {}
+    try:
+        if sample_rate is not None:
+            result["sample_rate"] = float(sample_rate)
+    except (TypeError, ValueError):
+        pass
+
+    try:
+        if num_channels is not None:
+            result["num_channels"] = int(num_channels)
+    except (TypeError, ValueError):
+        pass
+
+    if labels:
+        result["labels"] = labels
+    if bit_volts:
+        result["bit_volts"] = bit_volts
+
+    return result
+
+
+def load_open_ephys_dat_file(file_path, channel_index=None, signal_column=None, num_channels=None,
+                             sampling_rate=None, downsample_factor=10):
+    """
+    Load ECG signal from Open Ephys .dat file.
+
+    Parameters:
+    -----------
+    file_path : str
+        Path to .dat file
+    channel_index : int, optional
+        Channel index containing ECG in interleaved data
+    signal_column : int, optional
+        Alias of channel_index for compatibility with generic GUI loader flow
+    num_channels : int, optional
+        Number of interleaved channels
+    sampling_rate : float, optional
+        Sampling rate in Hz (auto-detected from structure.oebin when available)
+    downsample_factor : int, optional
+        Downsampling factor (default: 10)
+
+    Returns:
+    --------
+    hr : array
+        Heart rate signal
+    hr_ts : array
+        Time stamps for heart rate signal
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    metadata = _extract_open_ephys_metadata(file_path)
+
+    if sampling_rate is None:
+        sampling_rate = metadata.get("sample_rate")
+    if num_channels is None:
+        num_channels = metadata.get("num_channels")
+
+    labels = metadata.get("labels")
+    bit_volts = metadata.get("bit_volts")
+
+    # Open Ephys continuous.dat uses int16 little-endian samples.
+    raw_data = np.fromfile(file_path, dtype="<i2")
+    if raw_data.size == 0:
+        raise ValueError("DAT file is empty or could not be read")
+
+    if num_channels is None:
+        # Fallback: assume single channel when metadata is unavailable.
+        num_channels = 1
+
+    if num_channels < 1:
+        raise ValueError("num_channels must be >= 1")
+
+    # Keep compatibility with generic loader parameters used by GUI retry dialogs.
+    if channel_index is None and signal_column is not None:
+        channel_index = signal_column
+
+    if num_channels > 1 and channel_index is None:
+        raise ColumnSelectionRequiredError(
+            f"Open Ephys DAT appears to contain {num_channels} channels. Please select ECG channel.",
+            available_columns=list(range(num_channels)),
+            labels=labels if labels and len(labels) == num_channels else None
+        )
+
+    if channel_index is None:
+        channel_index = 0
+
+    if channel_index < 0 or channel_index >= num_channels:
+        raise ValueError(f"channel_index must be in [0, {num_channels - 1}]")
+
+    if num_channels == 1:
+        hr = raw_data.astype(float)
+    else:
+        usable_samples = (raw_data.size // num_channels) * num_channels
+        if usable_samples == 0:
+            raise ValueError("DAT file does not contain enough samples for declared channel count")
+        if usable_samples < raw_data.size:
+            raw_data = raw_data[:usable_samples]
+        reshaped_data = raw_data.reshape(-1, num_channels)
+        hr = reshaped_data[:, channel_index].astype(float)
+
+    # Convert to physical units when Open Ephys bit_volts metadata is available.
+    if bit_volts and channel_index < len(bit_volts) and bit_volts[channel_index] is not None:
+        hr = hr * bit_volts[channel_index]
+
+    if sampling_rate is None:
+        raise SamplingRateRequiredError(
+            "Sampling rate is required for DAT file. Could not infer from structure.oebin; please provide sampling_rate."
+        )
+
+    hr_ts = np.arange(len(hr)) / float(sampling_rate)
+
+    # Downsample
+    if downsample_factor > 1:
+        hr_ts, hr = downsample(hr_ts, hr, downsample_factor)
+
+    # Smooth the data (only if we have enough points)
+    if len(hr) > 21:
+        window_length = min(21, len(hr) if len(hr) % 2 == 1 else len(hr) - 1)
+        hr = savgol_filter(hr, window_length, 2)
+    elif len(hr) > 5:
+        window_length = len(hr) if len(hr) % 2 == 1 else len(hr) - 1
+        hr = savgol_filter(hr, window_length, min(2, window_length // 2))
+
+    return hr, hr_ts
+
+
 def load_ecg_file(file_path, **kwargs):
     """
     Generic ECG file loader that auto-detects file format.
@@ -675,12 +874,14 @@ def load_ecg_file(file_path, **kwargs):
         return load_mat_file(file_path, **kwargs)
     elif ext == '.wav':
         return load_wav_file(file_path, **kwargs)
+    elif ext == '.dat':
+        return load_open_ephys_dat_file(file_path, **kwargs)
     else:
         # Try CSV as fallback for unknown extensions
         try:
             return load_csv_file(file_path, **kwargs)
         except Exception as e:
-            raise ValueError(f"Unsupported file format: {ext}. Supported formats: .abf, .csv, .txt, .mat, .wav. Error: {str(e)}")
+            raise ValueError(f"Unsupported file format: {ext}. Supported formats: .abf, .csv, .txt, .mat, .wav, .dat. Error: {str(e)}")
 
 
 

@@ -40,6 +40,8 @@ class HRDetectionGUI:
         self.hrv_metrics = None
         self.file_path = None
         self.mouse_id = ""
+        self.signal_scale_factor = 1.0  # Applied to raw signal so loaded data is in a comparable range
+        self.original_signal_range = None  # (min, max) before normalization
         self.hr_highpass = np.array([])
         self.bpm_plot_needs_update = False  # Flag to track if BPM plot needs updating
         self.bpm_lines = {}  # Cache for BPM plot lines
@@ -409,12 +411,13 @@ class HRDetectionGUI:
         file_path = filedialog.askopenfilename(
             title="Select ECG File",
             filetypes=[
-                ("All Supported Formats", "*.abf;*.csv;*.txt;*.mat;*.wav"),
+                ("All Supported Formats", "*.abf;*.csv;*.txt;*.mat;*.wav;*.dat"),
                 ("ABF files", "*.abf"),
                 ("CSV files", "*.csv"),
                 ("TXT files", "*.txt"),
                 ("MATLAB files", "*.mat"),
                 ("WAV files", "*.wav"),
+                ("Open Ephys DAT files", "*.dat"),
                 ("All files", "*.*")
             ]
         )
@@ -473,6 +476,18 @@ class HRDetectionGUI:
                 raise RuntimeError("Maximum retry attempts reached. Please check file format and try again.")
             
             self.file_path = file_path
+
+            # Normalize signal amplitude to a comparable range for robust threshold tuning.
+            raw_min = float(np.min(self.hr))
+            raw_max = float(np.max(self.hr))
+            self.original_signal_range = (raw_min, raw_max)
+            peak_abs = max(abs(raw_min), abs(raw_max))
+
+            if peak_abs > 0:
+                self.signal_scale_factor = peak_abs
+                self.hr = self.hr / self.signal_scale_factor
+            else:
+                self.signal_scale_factor = 1.0
             
             # Update file label
             filename = os.path.basename(file_path)
@@ -501,7 +516,10 @@ class HRDetectionGUI:
             # Plot signal (without any peaks since we cleared everything)
             self.plot_signal()
             
-            self.status_var.set(f"File loaded: {filename}")
+            self.status_var.set(
+                f"File loaded: {filename} | normalized by {self.signal_scale_factor:.3g} "
+                f"(raw range: {raw_min:.3g} to {raw_max:.3g})"
+            )
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load file:\n{str(e)}")
@@ -1090,6 +1108,9 @@ class HRDetectionGUI:
             
             # Add metadata (optional, for reference)
             data['source_file'] = self.file_path if self.file_path else ""
+            data['signal_scale_factor'] = self.signal_scale_factor
+            if self.original_signal_range is not None:
+                data['original_signal_range'] = np.array(self.original_signal_range, dtype=float)
             data['detection_params'] = {
                 'threshold': self.thresh_var.get(),
                 'refractory': self.refrac_var.get(),
