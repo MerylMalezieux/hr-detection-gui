@@ -11,7 +11,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 import os
 
-from .hr_detection import load_abf_file, find_hr_peaks, find_inst_bpm
+from .hr_detection import (load_ecg_file, find_hr_peaks, find_inst_bpm,
+                          SamplingRateRequiredError, ColumnSelectionRequiredError)
 from .hrv_analysis import calculate_all_hrv_metrics, clean_bpm_signal
 from .event_editor import EventEditor
 
@@ -68,7 +69,7 @@ class HRDetectionGUI:
         file_frame = ttk.LabelFrame(top_frame, text="File Loading", padding="5")
         file_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 10))
         
-        ttk.Button(file_frame, text="Load ABF File", command=self.load_file).grid(row=0, column=0, padx=5)
+        ttk.Button(file_frame, text="Load ECG File", command=self.load_file).grid(row=0, column=0, padx=5)
         self.file_label = ttk.Label(file_frame, text="No file loaded")
         self.file_label.grid(row=0, column=1, padx=5)
         
@@ -239,11 +240,183 @@ class HRDetectionGUI:
         """Update highpass label."""
         self.highpass_label.config(text=f"{self.highpass_var.get():.1f}")
     
+    def ask_sampling_rate(self, default_value=1000.0):
+        """
+        Show dialog to ask user for sampling rate.
+        
+        Parameters:
+        -----------
+        default_value : float, optional
+            Default sampling rate value (default: 1000.0)
+            
+        Returns:
+        --------
+        float or None
+            Sampling rate in Hz, or None if cancelled
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Sampling Rate Required")
+        dialog.geometry("400x150")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        result = {'value': None}
+        
+        # Label
+        label = ttk.Label(dialog, text="Sampling rate not found in file.\nPlease enter the sampling rate (Hz):", 
+                         justify=tk.CENTER)
+        label.pack(pady=10)
+        
+        # Entry frame
+        entry_frame = ttk.Frame(dialog)
+        entry_frame.pack(pady=10)
+        
+        ttk.Label(entry_frame, text="Sampling Rate (Hz):").pack(side=tk.LEFT, padx=5)
+        entry = ttk.Entry(entry_frame, width=15)
+        entry.insert(0, str(default_value))
+        entry.pack(side=tk.LEFT, padx=5)
+        entry.focus()
+        entry.select_range(0, tk.END)
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        def ok_clicked():
+            try:
+                value = float(entry.get())
+                if value > 0:
+                    result['value'] = value
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("Error", "Sampling rate must be positive.")
+            except ValueError:
+                messagebox.showerror("Error", "Please enter a valid number.")
+        
+        def cancel_clicked():
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="OK", command=ok_clicked).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=cancel_clicked).pack(side=tk.LEFT, padx=5)
+        
+        # Bind Enter key
+        entry.bind('<Return>', lambda e: ok_clicked())
+        dialog.bind('<Escape>', lambda e: cancel_clicked())
+        
+        # Wait for dialog to close
+        dialog.wait_window()
+        
+        return result['value']
+    
+    def ask_matlab_column(self, available_columns, labels=None):
+        """
+        Show dialog to ask user to select MATLAB column.
+        
+        Parameters:
+        -----------
+        available_columns : list
+            List of column indices available
+        labels : list, optional
+            List of labels for each column (default: None)
+            
+        Returns:
+        --------
+        int or None
+            Selected column index, or None if cancelled
+        """
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select ECG Column")
+        dialog.geometry("500x300")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Center the dialog
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() // 2) - (dialog.winfo_width() // 2)
+        y = (dialog.winfo_screenheight() // 2) - (dialog.winfo_height() // 2)
+        dialog.geometry(f"+{x}+{y}")
+        
+        result = {'value': None}
+        
+        # Label
+        if labels:
+            label_text = "Multiple columns found. Please select the column containing ECG signal:"
+        else:
+            label_text = f"Data has {len(available_columns)} columns. Please select which column contains ECG signal:"
+        
+        label = ttk.Label(dialog, text=label_text, justify=tk.CENTER)
+        label.pack(pady=10)
+        
+        # Listbox with scrollbar
+        list_frame = ttk.Frame(dialog)
+        list_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, height=8)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        # Populate listbox
+        for i, col_idx in enumerate(available_columns):
+            if labels and i < len(labels):
+                display_text = f"Column {col_idx}: {labels[i]}"
+            else:
+                display_text = f"Column {col_idx}"
+            listbox.insert(tk.END, display_text)
+        
+        # Select first item by default
+        if listbox.size() > 0:
+            listbox.selection_set(0)
+            listbox.activate(0)
+        
+        # Buttons
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        def ok_clicked():
+            selection = listbox.curselection()
+            if selection:
+                result['value'] = available_columns[selection[0]]
+                dialog.destroy()
+            else:
+                messagebox.showwarning("Warning", "Please select a column.")
+        
+        def cancel_clicked():
+            dialog.destroy()
+        
+        ttk.Button(button_frame, text="OK", command=ok_clicked).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Cancel", command=cancel_clicked).pack(side=tk.LEFT, padx=5)
+        
+        # Bind double-click
+        listbox.bind('<Double-Button-1>', lambda e: ok_clicked())
+        dialog.bind('<Escape>', lambda e: cancel_clicked())
+        
+        # Wait for dialog to close
+        dialog.wait_window()
+        
+        return result['value']
+    
     def load_file(self):
-        """Load ABF file."""
+        """Load ECG file (supports multiple formats)."""
         file_path = filedialog.askopenfilename(
-            title="Select ABF File",
-            filetypes=[("ABF files", "*.abf"), ("All files", "*.*")]
+            title="Select ECG File",
+            filetypes=[
+                ("All Supported Formats", "*.abf;*.csv;*.txt;*.mat;*.wav"),
+                ("ABF files", "*.abf"),
+                ("CSV files", "*.csv"),
+                ("TXT files", "*.txt"),
+                ("MATLAB files", "*.mat"),
+                ("WAV files", "*.wav"),
+                ("All files", "*.*")
+            ]
         )
         
         if not file_path:
@@ -253,8 +426,52 @@ class HRDetectionGUI:
             self.status_var.set("Loading file...")
             self.root.update()
             
-            # Load file
-            self.hr, self.hr_ts = load_abf_file(file_path)
+            # Try to load file - may need user input for sampling rate or column selection
+            load_params = {}
+            max_retries = 5  # Prevent infinite loops
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                try:
+                    # Load file using generic loader (auto-detects format)
+                    self.hr, self.hr_ts = load_ecg_file(file_path, **load_params)
+                    self.file_path = file_path
+                    break  # Success, exit retry loop
+                    
+                except SamplingRateRequiredError as e:
+                    # Ask user for sampling rate
+                    sampling_rate = self.ask_sampling_rate()
+                    if sampling_rate is None:
+                        # User cancelled
+                        self.status_var.set("File loading cancelled")
+                        return
+                    load_params['sampling_rate'] = sampling_rate
+                    retry_count += 1
+                    
+                except ColumnSelectionRequiredError as e:
+                    # Ask user to select column
+                    column = self.ask_matlab_column(e.available_columns, e.labels)
+                    if column is None:
+                        # User cancelled
+                        self.status_var.set("File loading cancelled")
+                        return
+                    load_params['signal_column'] = column
+                    # Also need sampling rate if not provided
+                    if 'sampling_rate' not in load_params:
+                        sampling_rate = self.ask_sampling_rate()
+                        if sampling_rate is None:
+                            self.status_var.set("File loading cancelled")
+                            return
+                        load_params['sampling_rate'] = sampling_rate
+                    retry_count += 1
+                    
+                except Exception as e:
+                    # Other error - re-raise it
+                    raise
+            
+            if retry_count >= max_retries:
+                raise RuntimeError("Maximum retry attempts reached. Please check file format and try again.")
+            
             self.file_path = file_path
             
             # Update file label

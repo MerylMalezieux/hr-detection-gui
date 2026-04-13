@@ -51,3 +51,4 @@ Thumbs.db
 .coverage
 htmlcov/
 git_commands.txt
+FEATURE_BRANCH_WORKFLOW.md
