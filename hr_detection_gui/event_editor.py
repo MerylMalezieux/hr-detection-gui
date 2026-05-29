@@ -228,3 +228,15 @@ class EventEditor:
         self.removed_events = set()
         self.draw_events()
 
+    def update_data(self, ts, time_series, events):
+        """
+        Update timestamps/signal and reset events.
+
+        Use this when a new detection is run on a different time window
+        without recreating the entire editor object.
+        """
+        self.ts = ts
+        self.time_series = time_series
+        self.subsample_factor = max(1, len(ts) // 50000)
+        self.update_events(events)
+
