@@ -29,6 +29,8 @@ class HRDetectionGUI:
         # Data storage
         self.hr = None
         self.hr_ts = None
+        self.hr_raw = None
+        self.hr_ts_raw = None
         self.hr_sp_ind = None
         self.hr_sp_times = None  # Original detected peaks (before manual editing)
         self.inst_bpm = None  # Cleaned BPM signal (after outlier removal, for saving)
@@ -42,6 +44,10 @@ class HRDetectionGUI:
         self.mouse_id = ""
         self.signal_scale_factor = 1.0  # Applied to raw signal so loaded data is in a comparable range
         self.original_signal_range = None  # (min, max) before normalization
+        self.apply_trim_var = tk.BooleanVar(value=False)
+        self.trim_applied = False
+        self.trim_start_seconds = 0.0
+        self.trim_stop_seconds = None
         self.hr_highpass = np.array([])
         self.bpm_plot_needs_update = False  # Flag to track if BPM plot needs updating
         self.bpm_lines = {}  # Cache for BPM plot lines
@@ -79,6 +85,23 @@ class HRDetectionGUI:
         ttk.Label(file_frame, text="Mouse ID:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=(5, 0))
         self.mouse_id_entry = ttk.Entry(file_frame, width=15)
         self.mouse_id_entry.grid(row=1, column=1, padx=5, pady=(5, 0), sticky=tk.W)
+
+        # Time trimming controls
+        ttk.Checkbutton(
+            file_frame,
+            text="Apply time trim",
+            variable=self.apply_trim_var
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(5, 0))
+
+        ttk.Label(file_frame, text="good_seconds_start:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=(5, 0))
+        self.good_start_entry = ttk.Entry(file_frame, width=15)
+        self.good_start_entry.insert(0, "0")
+        self.good_start_entry.grid(row=3, column=1, padx=5, pady=(5, 0), sticky=tk.W)
+
+        ttk.Label(file_frame, text="good_seconds_stop:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=(5, 0))
+        self.good_stop_entry = ttk.Entry(file_frame, width=15)
+        self.good_stop_entry.insert(0, "")
+        self.good_stop_entry.grid(row=4, column=1, padx=5, pady=(5, 0), sticky=tk.W)
         
         # Parameters section
         params_frame = ttk.LabelFrame(top_frame, text="Detection Parameters", padding="5")
@@ -87,7 +110,7 @@ class HRDetectionGUI:
         # Threshold
         ttk.Label(params_frame, text="Threshold:").grid(row=0, column=0, sticky=tk.W, padx=5)
         self.thresh_var = tk.DoubleVar(value=0.04)
-        ttk.Scale(params_frame, from_=0.01, to=1.0, orient=tk.HORIZONTAL, 
+        ttk.Scale(params_frame, from_=0.0001, to=1.0, orient=tk.HORIZONTAL,
                  variable=self.thresh_var, length=150).grid(row=0, column=1, padx=5)
         self.thresh_entry = ttk.Entry(params_frame, width=8)
         self.thresh_entry.insert(0, "0.04")
@@ -184,23 +207,29 @@ class HRDetectionGUI:
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
         status_bar.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
     
+    def _format_threshold(self, value):
+        """Format threshold for display (extra precision when small)."""
+        if value < 0.01:
+            return f"{value:.4f}"
+        return f"{value:.3f}"
+
     def update_thresh_entry(self):
         """Update threshold entry from slider."""
         self.thresh_entry.delete(0, tk.END)
-        self.thresh_entry.insert(0, f"{self.thresh_var.get():.3f}")
+        self.thresh_entry.insert(0, self._format_threshold(self.thresh_var.get()))
     
     def update_thresh_from_entry(self):
         """Update threshold slider from entry."""
         try:
             value = float(self.thresh_entry.get())
-            if 0.01 <= value <= 1.0:
+            if 0.0001 <= value <= 1.0:
                 self.thresh_var.set(value)
             else:
                 self.thresh_entry.delete(0, tk.END)
-                self.thresh_entry.insert(0, f"{self.thresh_var.get():.3f}")
+                self.thresh_entry.insert(0, self._format_threshold(self.thresh_var.get()))
         except ValueError:
             self.thresh_entry.delete(0, tk.END)
-            self.thresh_entry.insert(0, f"{self.thresh_var.get():.3f}")
+            self.thresh_entry.insert(0, self._format_threshold(self.thresh_var.get()))
     
     def update_refrac_entry(self):
         """Update refractory period entry from slider."""
@@ -437,7 +466,7 @@ class HRDetectionGUI:
             while retry_count < max_retries:
                 try:
                     # Load file using generic loader (auto-detects format)
-                    self.hr, self.hr_ts = load_ecg_file(file_path, **load_params)
+                    loaded_hr, loaded_hr_ts = load_ecg_file(file_path, **load_params)
                     self.file_path = file_path
                     break  # Success, exit retry loop
                     
@@ -476,18 +505,12 @@ class HRDetectionGUI:
                 raise RuntimeError("Maximum retry attempts reached. Please check file format and try again.")
             
             self.file_path = file_path
+            self.hr_raw = np.asarray(loaded_hr).copy()
+            self.hr_ts_raw = np.asarray(loaded_hr_ts).copy()
 
-            # Normalize signal amplitude to a comparable range for robust threshold tuning.
-            raw_min = float(np.min(self.hr))
-            raw_max = float(np.max(self.hr))
-            self.original_signal_range = (raw_min, raw_max)
-            peak_abs = max(abs(raw_min), abs(raw_max))
-
-            if peak_abs > 0:
-                self.signal_scale_factor = peak_abs
-                self.hr = self.hr / self.signal_scale_factor
-            else:
-                self.signal_scale_factor = 1.0
+            # Build display/analysis signal from current trim settings.
+            self.prepare_analysis_signal()
+            raw_min, raw_max = self.original_signal_range
             
             # Update file label
             filename = os.path.basename(file_path)
@@ -516,14 +539,117 @@ class HRDetectionGUI:
             # Plot signal (without any peaks since we cleared everything)
             self.plot_signal()
             
+            if self.trim_applied:
+                trim_stop_text = "end" if self.trim_stop_seconds is None else f"{self.trim_stop_seconds:.3g}s"
+                trim_status = f"trimmed {self.trim_start_seconds:.3g}s to {trim_stop_text}"
+            else:
+                trim_status = "full recording (no trim)"
+
             self.status_var.set(
-                f"File loaded: {filename} | normalized by {self.signal_scale_factor:.3g} "
+                f"File loaded: {filename} | {trim_status} | normalized by {self.signal_scale_factor:.3g} "
                 f"(raw range: {raw_min:.3g} to {raw_max:.3g})"
             )
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load file:\n{str(e)}")
             self.status_var.set("Error loading file")
+
+    def get_trim_window_from_gui(self):
+        """Parse good_seconds_start/stop fields from GUI."""
+        start_text = self.good_start_entry.get().strip()
+        stop_text = self.good_stop_entry.get().strip()
+
+        # Default start to 0 if left empty.
+        if start_text == "":
+            start_seconds = 0.0
+        else:
+            try:
+                start_seconds = float(start_text)
+            except ValueError:
+                raise ValueError("good_seconds_start must be a valid number.")
+
+        if start_seconds < 0:
+            raise ValueError("good_seconds_start must be >= 0.")
+
+        if stop_text == "":
+            stop_seconds = None
+        else:
+            try:
+                stop_seconds = float(stop_text)
+            except ValueError:
+                raise ValueError("good_seconds_stop must be a valid number.")
+            if stop_seconds <= start_seconds:
+                raise ValueError("good_seconds_stop must be greater than good_seconds_start.")
+
+        return start_seconds, stop_seconds
+
+    def prepare_analysis_signal(self):
+        """
+        Build current analysis signal from raw loaded data.
+
+        This is called on file load and before each detection so users can
+        modify trim settings and re-detect without reloading the file.
+        """
+        if self.hr_raw is None or self.hr_ts_raw is None:
+            raise ValueError("No raw ECG data loaded.")
+
+        hr = np.asarray(self.hr_raw).copy()
+        hr_ts = np.asarray(self.hr_ts_raw).copy()
+
+        if self.apply_trim_var.get():
+            trim_start, trim_stop = self.get_trim_window_from_gui()
+            hr, hr_ts = self.trim_signal_to_time_window(hr, hr_ts, trim_start, trim_stop)
+            hr_ts = hr_ts - hr_ts[0]
+            self.trim_applied = True
+            self.trim_start_seconds = trim_start
+            self.trim_stop_seconds = trim_stop
+        else:
+            self.trim_applied = False
+            self.trim_start_seconds = 0.0
+            self.trim_stop_seconds = None
+
+        raw_min = float(np.min(hr))
+        raw_max = float(np.max(hr))
+        self.original_signal_range = (raw_min, raw_max)
+        peak_abs = max(abs(raw_min), abs(raw_max))
+
+        if peak_abs > 0:
+            self.signal_scale_factor = peak_abs
+            hr = hr / self.signal_scale_factor
+        else:
+            self.signal_scale_factor = 1.0
+
+        self.hr = hr
+        self.hr_ts = hr_ts
+
+    def trim_signal_to_time_window(self, hr, hr_ts, start_seconds, stop_seconds):
+        """Trim loaded signal and timestamps to requested [start, stop] time window."""
+        if hr is None or hr_ts is None or len(hr) == 0 or len(hr_ts) == 0:
+            raise ValueError("Loaded file contains no data to trim.")
+
+        if stop_seconds is None:
+            time_mask = hr_ts >= start_seconds
+        else:
+            time_mask = (hr_ts >= start_seconds) & (hr_ts <= stop_seconds)
+
+        if not np.any(time_mask):
+            ts_start = float(hr_ts[0])
+            ts_end = float(hr_ts[-1])
+            stop_text = "end" if stop_seconds is None else f"{stop_seconds}"
+            raise ValueError(
+                f"No data points in requested time window [{start_seconds}, {stop_text}]. "
+                f"Available time range is approximately [{ts_start:.3g}, {ts_end:.3g}] seconds."
+            )
+
+        return hr[time_mask], hr_ts[time_mask]
+
+    def get_trimmed_duration_seconds(self):
+        """Return expected trimmed duration in seconds, or None if not bounded."""
+        if not self.trim_applied:
+            return None
+        if self.trim_stop_seconds is None:
+            return None
+        return max(0.0, float(self.trim_stop_seconds - self.trim_start_seconds))
     
     def show_bpm_window(self):
         """Show or create the BPM plot window."""
@@ -647,9 +773,15 @@ class HRDetectionGUI:
         if bpm_min is not None and bpm_max is not None:
             self.bpm_ax.set_ylim([max(0, bpm_min), bpm_max])
         
-        # Auto-scale x-axis to full range
+        # Auto-scale x-axis:
+        # If trim stop is set, enforce that exact window duration for display.
+        # This avoids confusing extra margin/time beyond requested trim.
         if self.hr_ts is not None and len(self.hr_ts) > 0:
-            self.bpm_ax.set_xlim([self.hr_ts[0], self.hr_ts[-1]])
+            trimmed_duration = self.get_trimmed_duration_seconds()
+            if trimmed_duration is not None:
+                self.bpm_ax.set_xlim([0.0, trimmed_duration])
+            else:
+                self.bpm_ax.set_xlim([self.hr_ts[0], self.hr_ts[-1]])
         
         # Draw canvas
         self.bpm_canvas.draw()
@@ -701,10 +833,15 @@ class HRDetectionGUI:
         if self.bpm_plot_needs_update:
             self.update_bpm_window()
         
-        # Auto-zoom to first 5 seconds on x-axis
-        x_min = self.hr_ts[0] if self.hr_ts is not None and len(self.hr_ts) > 0 else 0
-        x_max = min(5.0, self.hr_ts[-1]) if self.hr_ts is not None and len(self.hr_ts) > 0 else 5.0
+        # Default x-axis behavior:
+        # - If trim is applied, show full trimmed window so users can verify trim bounds.
+        # - Otherwise keep legacy behavior (zoom first 5 seconds for quick peak inspection).
         if self.hr_ts is not None and len(self.hr_ts) > 0:
+            x_min = self.hr_ts[0]
+            if self.trim_applied:
+                x_max = self.hr_ts[-1]
+            else:
+                x_max = min(5.0, self.hr_ts[-1])
             self.ax.set_xlim([x_min, x_max])
         
         # Check if we have peaks for y-axis zoom
@@ -732,11 +869,14 @@ class HRDetectionGUI:
     
     def detect_peaks(self):
         """Detect HR peaks using current parameters."""
-        if self.hr is None:
+        if self.hr_raw is None or self.hr_ts_raw is None:
             messagebox.showwarning("Warning", "Please load a file first.")
             return
         
         try:
+            # Recompute analysis signal from current trim settings before detection.
+            self.prepare_analysis_signal()
+
             # Clear any previous detection results first
             self.hr_sp_ind = None
             self.hr_sp_times = None
@@ -795,8 +935,12 @@ class HRDetectionGUI:
                 self.event_editor = EventEditor(self.root, self.hr_ts, self.hr, 
                                                 self.hr_sp_times.tolist(), self.ax, self.canvas)
             else:
-                # Reset event editor with new detection results (overwrites previous)
-                self.event_editor.update_events(self.hr_sp_times.tolist() if len(self.hr_sp_times) > 0 else [])
+                # Refresh event editor signal/timestamps and events after re-detection.
+                self.event_editor.update_data(
+                    self.hr_ts,
+                    self.hr,
+                    self.hr_sp_times.tolist() if len(self.hr_sp_times) > 0 else []
+                )
             
             # Compute original BPM immediately after detection for visual inspection
             if len(self.hr_sp_times) >= 2:
@@ -961,6 +1105,9 @@ class HRDetectionGUI:
                        label='BPM (from cleaned peaks, signal cleaned)')
             ax_bpm.axhline(y=np.nanmean(self.inst_bpm), color='r', linestyle='--', 
                           label=f'Mean (cleaned): {np.nanmean(self.inst_bpm):.2f} BPM')
+        trimmed_duration = self.get_trimmed_duration_seconds()
+        if trimmed_duration is not None:
+            ax_bpm.set_xlim([0.0, trimmed_duration])
         ax_bpm.set_xlabel('Time (s)')
         ax_bpm.set_ylabel('BPM')
         ax_bpm.set_title('Instantaneous Heart Rate - Original vs. Cleaned Peaks (with signal cleaning)')
@@ -1111,6 +1258,9 @@ class HRDetectionGUI:
             data['signal_scale_factor'] = self.signal_scale_factor
             if self.original_signal_range is not None:
                 data['original_signal_range'] = np.array(self.original_signal_range, dtype=float)
+            data['trim_applied'] = self.trim_applied
+            data['good_seconds_start'] = self.trim_start_seconds
+            data['good_seconds_stop'] = self.trim_stop_seconds if self.trim_stop_seconds is not None else np.nan
             data['detection_params'] = {
                 'threshold': self.thresh_var.get(),
                 'refractory': self.refrac_var.get(),
