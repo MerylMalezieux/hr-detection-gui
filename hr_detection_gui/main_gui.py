@@ -19,6 +19,8 @@ from .event_editor import EventEditor
 
 class HRDetectionGUI:
     """Main GUI application for heart rate detection and analysis."""
+
+    DEFAULT_X_ZOOM_SECONDS = 5.0
     
     def __init__(self, root):
         """Initialize the GUI."""
@@ -55,6 +57,8 @@ class HRDetectionGUI:
         self.bpm_fig = None  # Figure for BPM window
         self.bpm_ax = None  # Axes for BPM window
         self.bpm_canvas = None  # Canvas for BPM window
+        self._auto_xlim = True  # Reset x-axis to default zoom on load/detect
+        self._setting_xlim = False  # Guard xlim_changed callback during programmatic zoom
         
         # Create GUI elements
         self.create_widgets()
@@ -180,6 +184,7 @@ class HRDetectionGUI:
         self.ax.set_ylabel('Amplitude')
         self.ax.set_title('Heart Rate Signal and Detected Peaks')
         self.ax.grid(True, alpha=0.3)
+        self.ax.callbacks.connect('xlim_changed', self._on_xlim_changed)
         # Adjust spacing
         self.fig.tight_layout(pad=2.0)
         
@@ -198,6 +203,7 @@ class HRDetectionGUI:
         toolbar_frame.grid(row=1, column=0, sticky=(tk.W, tk.E))
         toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame)
         toolbar.update()
+        self._setup_plot_keyboard()
         
         # Event editor (will be created when needed)
         self.event_editor = None
@@ -206,6 +212,81 @@ class HRDetectionGUI:
         self.status_var = tk.StringVar(value="Ready")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
         status_bar.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
+
+    def _setup_plot_keyboard(self):
+        """Enable left/right arrow keys to pan the signal plot in time."""
+        canvas_widget = self.canvas.get_tk_widget()
+        canvas_widget.configure(takefocus=True)
+        canvas_widget.bind('<Enter>', lambda _e: canvas_widget.focus_set())
+        self.fig.canvas.mpl_connect('key_press_event', self._on_mpl_arrow_key)
+        self.fig.canvas.mpl_connect('button_press_event', self._on_plot_button_press)
+
+    def _is_text_input_focused(self):
+        """Return True when focus is on a text-entry widget."""
+        focused = self.root.focus_get()
+        if focused is None:
+            return False
+        return focused.winfo_class() in ('Entry', 'TEntry', 'Text')
+
+    def _on_mpl_arrow_key(self, event):
+        """Pan the plot horizontally with arrow keys."""
+        if event.key not in ('left', 'right') or self.hr is None:
+            return
+        if self._is_text_input_focused():
+            return
+        direction = -1 if event.key == 'left' else 1
+        self.pan_x_axis(direction)
+
+    def _on_plot_button_press(self, event):
+        """Give the plot canvas keyboard focus when clicked."""
+        if event.inaxes == self.ax:
+            self.canvas.get_tk_widget().focus_set()
+
+    def _on_xlim_changed(self, ax):
+        """Track user-driven zoom/pan so plot redraws do not reset the view."""
+        if self._setting_xlim:
+            return
+        self._auto_xlim = False
+
+    def _get_default_xlim(self):
+        """Return the default x-axis window (first few seconds of the signal)."""
+        if self.hr_ts is None or len(self.hr_ts) == 0:
+            return None
+        x_min = float(self.hr_ts[0])
+        x_max = min(x_min + self.DEFAULT_X_ZOOM_SECONDS, float(self.hr_ts[-1]))
+        return x_min, x_max
+
+    def pan_x_axis(self, direction, fraction=0.25):
+        """Shift the x-axis view left (direction=-1) or right (direction=+1)."""
+        if self.hr_ts is None or len(self.hr_ts) == 0:
+            return
+
+        x0, x1 = self.ax.get_xlim()
+        width = x1 - x0
+        if width <= 0:
+            return
+
+        shift = direction * fraction * width
+        new_x0 = x0 + shift
+        new_x1 = x1 + shift
+        t_min = float(self.hr_ts[0])
+        t_max = float(self.hr_ts[-1])
+
+        if new_x0 < t_min:
+            new_x1 += t_min - new_x0
+            new_x0 = t_min
+        if new_x1 > t_max:
+            new_x0 -= new_x1 - t_max
+            new_x1 = t_max
+        new_x0 = max(new_x0, t_min)
+
+        self._auto_xlim = False
+        self._setting_xlim = True
+        try:
+            self.ax.set_xlim(new_x0, new_x1)
+        finally:
+            self._setting_xlim = False
+        self.canvas.draw_idle()
     
     def _format_threshold(self, value):
         """Format threshold for display (extra precision when small)."""
@@ -537,6 +618,7 @@ class HRDetectionGUI:
             # For now, leave it empty for user to enter
             
             # Plot signal (without any peaks since we cleared everything)
+            self._auto_xlim = True
             self.plot_signal()
             
             if self.trim_applied:
@@ -833,16 +915,13 @@ class HRDetectionGUI:
         if self.bpm_plot_needs_update:
             self.update_bpm_window()
         
-        # Default x-axis behavior:
-        # - If trim is applied, show full trimmed window so users can verify trim bounds.
-        # - Otherwise keep legacy behavior (zoom first 5 seconds for quick peak inspection).
-        if self.hr_ts is not None and len(self.hr_ts) > 0:
-            x_min = self.hr_ts[0]
-            if self.trim_applied:
-                x_max = self.hr_ts[-1]
-            else:
-                x_max = min(5.0, self.hr_ts[-1])
-            self.ax.set_xlim([x_min, x_max])
+        default_xlim = self._get_default_xlim()
+        if self._auto_xlim and default_xlim is not None:
+            self._setting_xlim = True
+            try:
+                self.ax.set_xlim(default_xlim)
+            finally:
+                self._setting_xlim = False
         
         # Check if we have peaks for y-axis zoom
         has_peaks = False
@@ -861,6 +940,13 @@ class HRDetectionGUI:
             self.ax.set_ylim([-2, 2])
             # Disable auto-scaling for y-axis to preserve our zoom
             self.ax.set_autoscaley_on(False)
+            # Re-apply x-limits after y-axis change (draw can reset autoscale)
+            if self._auto_xlim and default_xlim is not None:
+                self._setting_xlim = True
+                try:
+                    self.ax.set_xlim(default_xlim)
+                finally:
+                    self._setting_xlim = False
             # Force redraw with new y-limits
             self.canvas.draw()
         else:
@@ -956,10 +1042,14 @@ class HRDetectionGUI:
                     self.show_bpm_window()
             
             # Plot results with new detection (will show original BPM in top subplot)
+            self._auto_xlim = True
             self.plot_signal()
             
             num_peaks = len(self.hr_sp_times)
-            self.status_var.set(f"Detected {num_peaks} peaks with: {param_str}. Use left/right click to edit.")
+            self.status_var.set(
+                f"Detected {num_peaks} peaks with: {param_str}. "
+                "Use left/right click to edit peaks, arrow keys to pan."
+            )
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to detect peaks:\n{str(e)}")
