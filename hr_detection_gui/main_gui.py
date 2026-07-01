@@ -12,6 +12,7 @@ from matplotlib.figure import Figure
 import os
 
 from .hr_detection import (load_ecg_file, find_hr_peaks, find_inst_bpm,
+                          compute_robust_signal_scale,
                           SamplingRateRequiredError, ColumnSelectionRequiredError)
 from .hrv_analysis import calculate_all_hrv_metrics, clean_bpm_signal
 from .event_editor import EventEditor
@@ -45,6 +46,7 @@ class HRDetectionGUI:
         self.file_path = None
         self.mouse_id = ""
         self.signal_scale_factor = 1.0  # Applied to raw signal so loaded data is in a comparable range
+        self.signal_scale_percentile = 99.5  # Percentile used for robust amplitude scaling
         self.original_signal_range = None  # (min, max) before normalization
         self.apply_trim_var = tk.BooleanVar(value=False)
         self.trim_applied = False
@@ -169,6 +171,7 @@ class HRDetectionGUI:
         ttk.Button(buttons_frame, text="Compute BPM/HRV", command=self.compute_metrics).grid(row=1, column=0, padx=5, pady=2)
         ttk.Button(buttons_frame, text="Show BPM Plot", command=self.show_bpm_window).grid(row=2, column=0, padx=5, pady=2)
         ttk.Button(buttons_frame, text="Save Results", command=self.save_results).grid(row=3, column=0, padx=5, pady=2)
+        ttk.Button(buttons_frame, text="Load Cleaned Peaks", command=self.load_peaks_from_save).grid(row=4, column=0, padx=5, pady=2)
         
         # Main plot area (only HR signal, BPM will be in separate window)
         plot_frame = ttk.Frame(main_frame)
@@ -181,7 +184,7 @@ class HRDetectionGUI:
         # Single subplot for HR signal and peaks
         self.ax = self.fig.add_subplot(111)
         self.ax.set_xlabel('Time (s)')
-        self.ax.set_ylabel('Amplitude')
+        self.ax.set_ylabel('Amplitude (robust normalized)')
         self.ax.set_title('Heart Rate Signal and Detected Peaks')
         self.ax.grid(True, alpha=0.3)
         self.ax.callbacks.connect('xlim_changed', self._on_xlim_changed)
@@ -628,7 +631,8 @@ class HRDetectionGUI:
                 trim_status = "full recording (no trim)"
 
             self.status_var.set(
-                f"File loaded: {filename} | {trim_status} | normalized by {self.signal_scale_factor:.3g} "
+                f"File loaded: {filename} | {trim_status} | "
+                f"scaled by p{self.signal_scale_percentile:g}={self.signal_scale_factor:.3g} "
                 f"(raw range: {raw_min:.3g} to {raw_max:.3g})"
             )
             
@@ -693,11 +697,13 @@ class HRDetectionGUI:
         raw_min = float(np.min(hr))
         raw_max = float(np.max(hr))
         self.original_signal_range = (raw_min, raw_max)
-        peak_abs = max(abs(raw_min), abs(raw_max))
+        peak_abs = compute_robust_signal_scale(hr, percentile=self.signal_scale_percentile)
 
         if peak_abs > 0:
             self.signal_scale_factor = peak_abs
             hr = hr / self.signal_scale_factor
+            # Suppress rare post-scaling artifacts without affecting typical beats
+            hr = np.clip(hr, -10.0, 10.0)
         else:
             self.signal_scale_factor = 1.0
 
@@ -899,7 +905,7 @@ class HRDetectionGUI:
         
         # Set labels for bottom subplot
         self.ax.set_xlabel('Time (s)')
-        self.ax.set_ylabel('Amplitude')
+        self.ax.set_ylabel('Amplitude (robust normalized)')
         self.ax.set_title('Heart Rate Signal and Detected Peaks')
         self.ax.grid(True, alpha=0.3)
         
@@ -1126,6 +1132,77 @@ class HRDetectionGUI:
             self.status_var.set("Error computing metrics")
     
     
+    def _set_cleaned_peaks(self, peak_times):
+        """Apply cleaned peak times to the event editor and internal state."""
+        peak_times = np.asarray(peak_times, dtype=float)
+        peak_times = np.sort(peak_times)
+
+        if self.hr_ts is None or len(self.hr_ts) == 0:
+            raise ValueError("Load the ECG file first.")
+
+        t_min = float(self.hr_ts[0])
+        t_max = float(self.hr_ts[-1])
+        in_range = (peak_times >= t_min) & (peak_times <= t_max)
+        if not np.all(in_range):
+            n_out = int(np.sum(~in_range))
+            messagebox.showwarning(
+                "Warning",
+                f"{n_out} peak(s) fall outside the loaded signal time range and were ignored."
+            )
+            peak_times = peak_times[in_range]
+
+        if peak_times.size < 2:
+            raise ValueError("Need at least 2 peaks within the loaded signal range.")
+
+        self.hr_sp_times = peak_times
+        peak_list = peak_times.tolist()
+
+        if self.event_editor is None:
+            self.event_editor = EventEditor(
+                self.root, self.hr_ts, self.hr, peak_list, self.ax, self.canvas
+            )
+        else:
+            self.event_editor.update_data(self.hr_ts, self.hr, peak_list)
+
+        self.plot_signal()
+
+    def load_peaks_from_save(self):
+        """Restore manually cleaned peaks from a previously saved .npy file."""
+        if self.hr is None:
+            messagebox.showwarning("Warning", "Please load the ECG file first (same file/trim as before).")
+            return
+
+        file_path = filedialog.askopenfilename(
+            title="Load Cleaned Peaks",
+            filetypes=[("NumPy files", "*.npy"), ("All files", "*.*")]
+        )
+        if not file_path:
+            return
+
+        try:
+            data = np.load(file_path, allow_pickle=True)
+            if hasattr(data, 'item'):
+                data = data.item()
+            if not isinstance(data, dict) or 'R_start' not in data:
+                raise ValueError("File does not contain cleaned peaks (expected 'R_start' array).")
+
+            peak_times = np.asarray(data['R_start'], dtype=float)
+            self._set_cleaned_peaks(peak_times)
+
+            source = data.get('source_file', '')
+            source_msg = f" from {os.path.basename(source)}" if source else ""
+            self.status_var.set(
+                f"Loaded {len(peak_times)} cleaned peaks{source_msg}. Click Compute BPM/HRV to re-run analysis."
+            )
+            messagebox.showinfo(
+                "Peaks Loaded",
+                f"Restored {len(peak_times)} cleaned peaks.\n\n"
+                "Click **Compute BPM/HRV** to run the updated analysis."
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load cleaned peaks:\n{str(e)}")
+            self.status_var.set("Error loading cleaned peaks")
+    
     def show_metrics_window(self):
         """Show metrics visualization window."""
         if self.hrv_metrics is None or self.inst_bpm is None:
@@ -1253,7 +1330,9 @@ class HRDetectionGUI:
             fig_rr = Figure(figsize=(10, 5))
             ax_rr = fig_rr.add_subplot(111)
             
-            RR = np.diff(cleaned_events) * 1000  # Convert to ms
+            RR = self.hrv_metrics.get('rr_intervals')
+            if RR is None or len(RR) == 0:
+                RR = np.diff(cleaned_events) * 1000  # Convert to ms
             rr_times = cleaned_events[1:]  # Times for RR intervals
             
             ax_rr.plot(rr_times, RR, 'o-', markersize=3, linewidth=1)
@@ -1261,7 +1340,7 @@ class HRDetectionGUI:
                          label=f'Mean: {np.nanmean(RR):.2f} ms')
             ax_rr.set_xlabel('Time (s)')
             ax_rr.set_ylabel('RR Interval (ms)')
-            ax_rr.set_title('RR Intervals Over Time')
+            ax_rr.set_title('RR Intervals Over Time (outliers removed, interpolated)')
             ax_rr.grid(True, alpha=0.3)
             ax_rr.legend()
             
@@ -1336,6 +1415,8 @@ class HRDetectionGUI:
                 data['min_rr'] = self.hrv_metrics['min_rr']
                 data['max_rr'] = self.hrv_metrics['max_rr']
                 data['std_rr'] = self.hrv_metrics['std_rr']
+                if 'rr_intervals' in self.hrv_metrics:
+                    data['rr_intervals'] = self.hrv_metrics['rr_intervals']
             
             # Add highpass filtered signal if available
             if self.hr_highpass.size > 0:

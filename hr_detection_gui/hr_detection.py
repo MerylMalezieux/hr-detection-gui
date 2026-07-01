@@ -55,6 +55,30 @@ def downsample(ts, signal_data, ds_factor):
     return ds_ts, signal_ds
 
 
+def compute_robust_signal_scale(signal, percentile=99.5):
+    """
+    Estimate characteristic signal amplitude for normalization.
+
+    Uses a high percentile of the baseline-removed signal so rare drift
+    spikes or data-loss artifacts do not dominate the scale factor.
+    """
+    signal = np.asarray(signal, dtype=float)
+    if signal.size == 0:
+        return 1.0
+
+    centered = signal - np.median(signal)
+    abs_vals = np.abs(centered[np.isfinite(centered)])
+    if abs_vals.size == 0:
+        return 1.0
+
+    scale = float(np.percentile(abs_vals, percentile))
+    if scale <= 0:
+        scale = float(np.max(abs_vals))
+    if scale <= 0:
+        return 1.0
+    return scale
+
+
 def load_abf_file(file_path, channel_name='IN2', channel_index=None, 
                   start_time=0, stop_time=None, downsample_factor=10):
     """
